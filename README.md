@@ -78,6 +78,65 @@ silent.
 - `dma_alloc_coherent()`/dmaengine descriptors instead of the vmalloc ring
 - runtime PM, and `debugfs` for register dumps
 
+## Design lineage and prior art
+
+Nothing here is invented from scratch — each mechanism follows an
+established, documented pattern from production kernel infrastructure or
+published DAQ work:
+
+- **Char device + ioctl + mmap + wait-queue blocking I/O** — the
+  canonical structure from J. Corbet, A. Rubini, G. Kroah-Hartman,
+  [*Linux Device Drivers*, 3rd ed.](https://lwn.net/Kernel/LDD3/),
+  O'Reilly, 2005 (chs. 3, 6, 15).
+- **Header page with a release/acquire-published `head` pointer** —
+  modelled on the Linux **perf ring buffer**, whose
+  `perf_event_mmap_page::data_head` is published to a read-only
+  user-space mapping with exactly this barrier pairing
+  ([`perf_event_open(2)`](https://man7.org/linux/man-pages/man2/perf_event_open.2.html)),
+  and on **io_uring**'s mmap'd submission/completion rings — J. Axboe,
+  [*Efficient IO with io_uring*](https://kernel.dk/io_uring.pdf), 2019.
+- **Lockless ring-buffer theory** — M. Desnoyers, M. R. Dagenais,
+  [“Lockless multi-core high-throughput buffering scheme for kernel
+  tracing”](https://dl.acm.org/doi/10.1145/2421648.2421659), *ACM SIGOPS
+  Operating Systems Review* 46(3), 2012 (formally verified in ch. 5 of
+  Desnoyers' PhD dissertation, École Polytechnique de Montréal, 2009);
+  see also the kernel's own
+  [ftrace ring-buffer design document](https://docs.kernel.org/trace/ring-buffer-design.html).
+- **Never-stalling producer that laps slow consumers, with counted
+  overruns** — LTTng's *flight-recorder* / ftrace *overwrite* mode
+  (same references as above); this is also how real acquisition
+  hardware behaves, since an ADC cannot be backpressured.
+- **The overall DAQ-driver shape (timestamped blocks, sysfs control,
+  trigger/start semantics)** — F. Vaga, A. Rubini, J. D. González Cobas
+  *et al.*, [“ZIO: The Ultimate Linux I/O
+  Framework”](https://proceedings.jacow.org/ICALEPCS2013/papers/momib09.pdf),
+  *Proc. ICALEPCS 2013*, CERN
+  ([CDS record](https://cds.cern.ch/record/1620805)). daqring is in
+  effect a single-device miniature of what ZIO generalises.
+- **Zero-copy FPGA→user-space delivery through a char device** —
+  [bperez77/xilinx_axidma](https://github.com/bperez77/xilinx_axidma)
+  (zero-copy AXI DMA driver + user library for Zynq) and
+  [ikwzm/udmabuf](https://github.com/ikwzm/udmabuf) (DT-probed,
+  mmap-able DMA buffers). The copy-vs-mmap trade-off that motivates
+  keeping *both* data paths is measured in the REDS institute's
+  [Zynq DMA benchmark](https://blog.reds.ch/?p=2054).
+- **DMA engines and their Linux drivers for FPGA DAQ** —
+  W. M. Zabołotny, [“DMA implementations for FPGA-based data
+  acquisition
+  systems”](https://www.spiedigitallibrary.org/conference-proceedings-of-spie/10445/1/DMA-implementations-for-FPGA-based-data-acquisition-systems/10.1117/12.2280937.short),
+  *Proc. SPIE* 10445, 2017; for the Ethernet-streaming stretch goal,
+  his [“Low latency protocol for transmission of measurement data from
+  FPGA to Linux computer via 10 Gbps Ethernet
+  link”](https://arxiv.org/abs/1503.06871), 2015.
+- **Developing DAQ drivers before/without the hardware** —
+  [“QEMU-based hardware/software co-development for DAQ
+  systems”](https://arxiv.org/abs/2109.14735), 2021, argues the same
+  workflow this module embodies; daqring trades emulator fidelity for
+  zero-setup simulation inside the driver itself.
+- **Hardirq/threaded-IRQ split (v2, real GPIO interrupts)** — J. Corbet,
+  [“Moving interrupts to threads”](https://lwn.net/Articles/302043/),
+  LWN.net, 2008.
+
 ## License
 
 GPL-2.0. Author: Joseph Ambrose Pagaran.
