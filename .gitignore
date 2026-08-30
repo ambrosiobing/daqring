@@ -1,0 +1,15 @@
+# kbuild artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.symvers
+*.order
+.*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+
+# user-space test binary
+test/daqring_test
