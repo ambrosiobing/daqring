@@ -21,6 +21,14 @@ OUT=/tmp/daqring_run.txt
 run_point() {	# $1 = rate, $2 = label
 	sudo rmmod daqring 2>/dev/null
 	sudo insmod daqring.ko || return 1
+	# misc devices get a fresh dynamic minor on every load; wait for
+	# udev to recreate the node, or the first run opens a stale one.
+	command -v udevadm >/dev/null 2>&1 && sudo udevadm settle 2>/dev/null
+	i=0
+	while [ ! -c /dev/daqring ] && [ "$i" -lt 50 ]; do
+		sleep 0.1
+		i=$((i + 1))
+	done
 	sudo ./test/daqring_test mmap "$1" "$SECS" >"$OUT" 2>&1
 	ACH=$(sed -n 's/.*(\([0-9]*\) samples\/s).*/\1/p' "$OUT" | head -1)
 	GAPS=$(sed -n 's/.*, \([0-9]*\) sequence gaps.*/\1/p' "$OUT" | head -1)

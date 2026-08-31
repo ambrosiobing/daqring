@@ -148,6 +148,42 @@ per sample; a real card batches samples per IRQ precisely to push this
 ceiling out. Both data paths again completed with **zero sequence
 gaps** (read: 5,001 samples/s; mmap: 19,997 samples/s).
 
+## Characterisation — rate sweep and behaviour under load
+
+Pi 3 B+, 32-bit `4.19.66-v7+`, hardware mode, 5 s per point, module
+reloaded between runs so each row stands alone. `pulses` is trigger
+edges emitted, `irqs` is interrupts actually taken; the gap between
+them is the interrupt-rate ceiling showing itself. Latency is
+trigger-to-ISR, in microseconds.
+
+| Sample rate | Achieved | Seq. gaps | Pulses | IRQs | Lost | min | avg | max |
+|---|---|---|---|---|---|---|---|---|
+| 5 kHz  | 5,000/s  | 0 | 25,003  | 25,003  | 0    | 1.6 | 4.2 | 80.4 |
+| 10 kHz | 10,000/s | 0 | 50,005  | 50,005  | 0    | 2.9 | 7.3 | 22.3 |
+| 20 kHz | 19,990/s | 0 | 99,996  | 99,974  | 22   | 0.9 | 4.3 | 64.7 |
+| 50 kHz | 49,984/s | 0 | 250,064 | 250,027 | 37   | 2.5 | 3.8 | 26.6 |
+| 20 kHz, 4 cores loaded | 19,999/s | 0 | 100,007 | 100,007 | **0** | 1.0 | **1.4** | **9.3** |
+
+Two things worth drawing out.
+
+**The requested rate holds to 50 kHz** — the achieved rate tracks it to
+within 0.03%, and the mmap consumer sees zero sequence gaps at every
+point. What degrades first is not throughput but *edge capture*: from
+20 kHz upward a small fraction of trigger edges (0.015–0.02%) never
+become interrupts. One interrupt per sample is the wrong shape at
+these rates, which is precisely why real acquisition hardware batches
+many samples per interrupt and hands them over by DMA.
+
+**Latency improves under load, and edge loss disappears.** Average
+trigger-to-ISR latency falls from 4.3 µs to 1.4 µs and the worst case
+from 64.7 µs to 9.3 µs when all four cores are busy. That is not a
+measurement artefact: an idle Cortex-A53 sits in WFI at a reduced
+clock, and pulling it out of that state costs microseconds, while a
+loaded CPU is already awake at full frequency. The practical lesson
+for a low-latency acquisition box is the familiar one — pin the
+`performance` governor and keep the CPU out of deep idle states,
+because *idle* is what makes interrupt response slow and jittery.
+
 ## What a real-hardware version would add
 
 - `platform_driver` probe bound by device tree compatible string, `devm_*`
