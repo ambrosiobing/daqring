@@ -104,6 +104,19 @@ fi
 echo "--- toolchain now selected: ---"
 grep -E '^BR2_TOOLCHAIN_[A-Z_]*=y' .config || true
 
+# Parallelism: the fragment defaults to 2 jobs for a 1 GB Pi. On a
+# roomier build host use more, but stay within about one job per GB of
+# RAM - Buildroot's compile steps are memory-hungry and the OOM killer
+# is a slow way to learn that.
+CORES=$(nproc 2>/dev/null || echo 2)
+RAM_GB=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null || echo 1)
+JOBS=$RAM_GB
+[ "$JOBS" -lt 2 ] && JOBS=2
+[ "$JOBS" -gt "$CORES" ] && JOBS=$CORES
+echo "--- build host: $CORES cores, ${RAM_GB}G RAM -> BR2_JLEVEL=$JOBS ---"
+sed -i "s/^BR2_JLEVEL=.*/BR2_JLEVEL=$JOBS/" .config
+make BR2_EXTERNAL="$REPO/br2-external" olddefconfig
+
 echo "--- building (this is the long part) ---"
 make BR2_EXTERNAL="$REPO/br2-external"
 

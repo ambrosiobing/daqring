@@ -183,6 +183,40 @@ development SD card is never touched) — check the device name with
 sudo dd if=output/images/sdcard.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
+## Building the bootable image (Buildroot)
+
+The module, its device-tree overlay and the test tools are packaged as
+a Buildroot `BR2_EXTERNAL` tree, so a single command produces a
+complete bootable SD/USB image with daqring loaded at startup.
+
+Buildroot is a cross-build system: run it on a Linux workstation (or
+WSL2 on Windows), not on the Pi itself, unless you enjoy waiting.
+
+```sh
+sudo apt update && sudo apt install -y git
+git clone https://github.com/ambrosiobing/daqring.git
+cd daqring && ./scripts/day2.sh
+```
+
+`day2.sh` installs the build prerequisites and launches the build
+detached; it prints how to follow along. Check progress at any time:
+
+```sh
+./scripts/status.sh
+```
+
+The result is `~/br/buildroot-*/output/images/sdcard.img`. Write it to
+a USB stick or spare card - on Linux with the guarded helper (it
+refuses to touch an SD card device or a mounted root/boot filesystem):
+
+```sh
+sudo ./scripts/flash-image.sh /dev/sdX
+```
+
+On Windows, use Raspberry Pi Imager's *Use custom* option instead. A
+Pi 3 B+ or Pi 4 boots the resulting image from USB with no SD card
+inserted.
+
 ## Design lineage and prior art
 
 Nothing here is invented from scratch — each mechanism follows an
