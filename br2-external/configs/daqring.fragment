@@ -1,13 +1,12 @@
 # daqring additions, appended to raspberrypi3_defconfig.
 #
-# External Bootlin toolchain: the Pi then only builds the kernel and
-# rootfs, not GCC - the difference between an overnight build and a
-# multi-day one on a Pi 3. If this symbol doesn't exist in your
-# Buildroot release, olddefconfig silently falls back to the internal
-# toolchain (build still succeeds, just much longer).
-BR2_TOOLCHAIN_EXTERNAL=y
-BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
-BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_ARMV7_EABIHF_GLIBC_STABLE=y
+# No external-toolchain override here, deliberately. The Bootlin
+# armv7-eabihf toolchains require BR2_ARM_CPU_ARMV7A, but the Pi 3
+# defconfig selects a Cortex-A53 (ARMv8). The option is therefore
+# hidden, the toolchain choice silently falls back to
+# BR2_TOOLCHAIN_EXTERNAL_CUSTOM with an empty path, and the build dies
+# with "Cannot execute cross-compiler '/arm-linux-gcc'". Buildroot's
+# internal toolchain always matches the target - slower, always right.
 
 # 1 GB of RAM: two build jobs, not four.
 BR2_JLEVEL=2

@@ -89,6 +89,21 @@ if [ ! -f .config ]; then
 	make BR2_EXTERNAL="$REPO/br2-external" olddefconfig
 fi
 
+# A toolchain choice that did not apply to this target leaves
+# BR2_TOOLCHAIN_EXTERNAL_CUSTOM selected with an empty path, which only
+# fails ~20 minutes in with "Cannot execute cross-compiler
+# '/arm-linux-gcc'". Detect that up front and fall back to the internal
+# toolchain, which always matches the target.
+if grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' .config; then
+	echo "--- unusable external toolchain selected; switching to internal ---"
+	sed -i '/^BR2_TOOLCHAIN_EXTERNAL/d' .config
+	make BR2_EXTERNAL="$REPO/br2-external" olddefconfig
+	make BR2_EXTERNAL="$REPO/br2-external" clean
+fi
+
+echo "--- toolchain now selected: ---"
+grep -E '^BR2_TOOLCHAIN_[A-Z_]*=y' .config || true
+
 echo "--- building (this is the long part) ---"
 make BR2_EXTERNAL="$REPO/br2-external"
 
