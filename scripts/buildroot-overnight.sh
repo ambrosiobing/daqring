@@ -132,6 +132,26 @@ if [ ! -f .config ]; then
 	make $MAKEVARS olddefconfig
 fi
 
+# Re-apply the config fragment on every run so new settings (the
+# post-build overlay hook, host-dtc) reach a tree configured earlier.
+cat "$REPO/br2-external/configs/daqring.fragment" >>.config
+make $MAKEVARS olddefconfig
+
+# The Pi 3 defconfig builds only the 3 B device tree; a 3 B+ needs its
+# own DTB or the firmware finds nothing to hand the kernel. Append the
+# -plus variant, keeping whatever path prefix the defconfig uses.
+DTSCUR=$(sed -n 's/^BR2_LINUX_KERNEL_INTREE_DTS_NAME="\(.*\)"//p' .config)
+case "$DTSCUR" in
+*rpi-3-b-plus*)
+	;;
+*rpi-3-b*)
+	DTSPLUS=$(printf '%s' "$DTSCUR" | sed 's/.*\(broadcom\/\)\?bcm2710-rpi-3-b$/&-plus/')
+	echo "--- adding Pi 3 B+ device tree: $DTSPLUS ---"
+	sed -i "s|^BR2_LINUX_KERNEL_INTREE_DTS_NAME=.*|BR2_LINUX_KERNEL_INTREE_DTS_NAME=\"$DTSCUR $DTSPLUS\"|" .config
+	make $MAKEVARS olddefconfig
+	;;
+esac
+
 # A toolchain choice that did not apply to this target leaves
 # BR2_TOOLCHAIN_EXTERNAL_CUSTOM selected with an empty path, which only
 # fails ~20 minutes in with "Cannot execute cross-compiler

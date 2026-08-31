@@ -8,8 +8,17 @@
 # with "Cannot execute cross-compiler '/arm-linux-gcc'". Buildroot's
 # internal toolchain always matches the target - slower, always right.
 
-# 1 GB of RAM: two build jobs, not four.
+# 1 GB of RAM: two build jobs, not four. Raised automatically by
+# scripts/buildroot-overnight.sh on a roomier build host.
 BR2_JLEVEL=2
 
 BR2_PACKAGE_DAQRING=y
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_DAQRING_PATH)/rootfs-overlay"
+
+# dtc on the host, to compile the overlay at image time.
+BR2_PACKAGE_HOST_DTC=y
+
+# Installs overlays/daqring.dtbo into the boot partition and adds
+# dtoverlay=daqring to config.txt - without this the image boots into
+# simulation mode, since nothing declares the jap,daqring node.
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_DAQRING_PATH)/board/post-build.sh"

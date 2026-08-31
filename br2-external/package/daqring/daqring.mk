@@ -12,11 +12,11 @@ DAQRING_LICENSE_FILES = README.md
 
 # The kernel module is built by the kernel-module infrastructure (the
 # top-level Makefile's KERNELRELEASE branch provides obj-m). The test
-# client is cross-compiled here; -latomic for the 64-bit acquire load
-# on 32-bit ARM userspace.
+# client is cross-compiled here; for the 64-bit acquire load
+# (see load_head in the test client), so no libatomic is needed.
 define DAQRING_BUILD_CMDS
 	$(TARGET_CC) -O2 -Wall -Wextra -I$(@D)/include \
-		-o $(@D)/daqring_test $(@D)/test/daqring_test.c -latomic
+		-o $(@D)/daqring_test $(@D)/test/daqring_test.c
 endef
 
 define DAQRING_INSTALL_TARGET_CMDS
