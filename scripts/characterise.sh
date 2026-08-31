@@ -13,6 +13,8 @@ cd "$(dirname "$0")/.."
 SECS=${SECS:-5}
 RATES=${RATES:-"1000 5000 10000 20000 50000"}
 SYSFS=/sys/class/misc/daqring
+DAQRING_DEBUG=1
+export DAQRING_DEBUG
 OUT=/tmp/daqring_run.txt
 
 [ -f daqring.ko ] || make module || exit 1
