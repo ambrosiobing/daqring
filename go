@@ -13,6 +13,7 @@
 #   ./go clean       stop it and delete the build tree (frees the space)
 #   ./go flash /dev/sdX    write the built image to a USB stick
 #   ./go log         last 40 lines of the build log
+#   ./go cool        kill stray CPU load, show temperature
 #
 # Every task updates the repo first, so this file is the only thing
 # worth remembering.
@@ -68,6 +69,14 @@ flash)
 	;;
 log)
 	exec tail -40 "${WORK:-$HOME/br}/build.log"
+	;;
+cool)
+	pkill -f 'while :; do :; done' 2>/dev/null &&
+		echo "killed stray load processes" || echo "no stray load found"
+	command -v vcgencmd >/dev/null 2>&1 &&
+		vcgencmd measure_temp && vcgencmd get_throttled
+	uptime
+	exit 0
 	;;
 *)
 	awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next }

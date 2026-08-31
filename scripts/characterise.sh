@@ -62,12 +62,32 @@ done
 echo
 NCPU=$(nproc 2>/dev/null || echo 4)
 echo "--- loading $NCPU cores ---"
+
+# Collect PIDs with $! as each spinner starts. `jobs -p` does not work
+# in a non-interactive shell, and getting this wrong leaves the cores
+# pegged at 100% long after the script exits - the board just quietly
+# cooks. The trap makes Ctrl-C safe too.
+LOADPIDS=""
+stop_load() {
+	[ -n "$LOADPIDS" ] && kill $LOADPIDS 2>/dev/null
+	LOADPIDS=""
+}
+trap 'stop_load; exit 130' INT TERM
+
 i=0
 while [ "$i" -lt "$NCPU" ]; do
 	sh -c 'while :; do :; done' &
+	LOADPIDS="$LOADPIDS $!"
 	i=$((i + 1))
 done
-LOADPIDS=$(jobs -p)
+
 run_point 20000 "load"
-kill $LOADPIDS 2>/dev/null
+
+stop_load
+# Belt and braces: kill anything of ours that outlived its PID.
+pkill -f 'while :; do :; done' 2>/dev/null
+trap - INT TERM
 echo "--- load stopped ---"
+if command -v vcgencmd >/dev/null 2>&1; then
+	echo "--- $(vcgencmd measure_temp), $(vcgencmd get_throttled) ---"
+fi
