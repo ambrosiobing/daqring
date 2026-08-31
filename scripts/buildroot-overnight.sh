@@ -32,6 +32,23 @@ fi
 exec >>"$LOG" 2>&1
 echo "=== $(date -u) starting: $BR_VERSION / $DEFCONFIG ==="
 
+# WSL exports the whole Windows PATH into Linux, and entries such as
+# "/mnt/c/Program Files/..." contain spaces. Buildroot refuses to run
+# with those ("Your PATH contains spaces, TABs, and/or newline").
+# Drop any whitespace-bearing entry; nothing the build needs lives in
+# one.
+case "$PATH" in
+*[[:space:]]*)
+	CLEANPATH=$(printf '%s' "$PATH" | tr ':' '
+' | grep -v '[[:space:]]' | paste -sd:)
+	if [ -n "$CLEANPATH" ]; then
+		echo "--- PATH contained spaces (WSL interop); sanitised ---"
+		PATH=$CLEANPATH
+		export PATH
+	fi
+	;;
+esac
+
 # Build-time prerequisites (harmless if already present).
 if ! command -v bison >/dev/null 2>&1; then
 	# An EOL distro's mirrors may 404; that is not fatal on its own,
