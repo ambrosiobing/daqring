@@ -9,7 +9,14 @@ PIDS=$(pgrep -f buildroot-overnight 2>/dev/null | tr '\n' ' ')
 if [ -n "$PIDS" ]; then
 	echo "RUNNING (pid $PIDS)"
 else
-	echo "NOT running - finished, or stopped (check the log below)"
+	if [ -f "$LOG" ] && tail -400 "$LOG" | grep -q "DONE ==="; then
+		echo "NOT running - FINISHED SUCCESSFULLY"
+	elif [ -f "$LOG" ] && tail -400 "$LOG" | grep -qE "^make(\[[0-9]+\])?: \*\*\*"; then
+		echo "NOT running - BUILD FAILED. First error in the log:"
+		grep -m1 -E "Error:|error:" "$LOG" | cut -c1-100
+	else
+		echo "NOT running - finished, or stopped (check the log below)"
+	fi
 fi
 
 echo

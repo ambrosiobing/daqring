@@ -9,6 +9,8 @@
 #   ./go build       start the Buildroot image build (detached)
 #   ./go status      how the Buildroot build is doing
 #   ./go restart     stop a stuck build and start it again
+#   ./go stop        stop the Buildroot build, leave everything else alone
+#   ./go clean       stop it and delete the build tree (frees the space)
 #   ./go flash /dev/sdX    write the built image to a USB stick
 #   ./go log         last 40 lines of the build log
 #
@@ -47,6 +49,18 @@ status)
 	;;
 restart)
 	exec sh ./scripts/restart.sh
+	;;
+stop)
+	pkill -f buildroot-overnight 2>/dev/null && echo "build stopped" ||
+		echo "no build was running"
+	pkill -f 'wget.*buildroot' 2>/dev/null
+	exit 0
+	;;
+clean)
+	pkill -f buildroot-overnight 2>/dev/null
+	rm -rf "${WORK:-$HOME/br}"
+	echo "removed ${WORK:-$HOME/br}"
+	exit 0
 	;;
 flash)
 	shift
