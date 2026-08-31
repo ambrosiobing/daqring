@@ -70,6 +70,32 @@ The test client verifies sequence continuity on every sample and reports
 gaps alongside the kernel's own counters, so lost data is visible, not
 silent.
 
+## Measured baseline — Raspberry Pi 3 B+ (31 Aug 2026)
+
+First hardware run: Raspberry Pi 3 B+ (Cortex-A53), Raspbian with the
+**32-bit** `4.19.66-v7+` kernel — deliberately kept as a harder
+portability target than a modern 64-bit image. Ring: 2730 slots,
+16 pages + header page (69,632-byte mmap window).
+
+| Path              | Requested rate | Achieved                              | Sequence gaps |
+|-------------------|----------------|---------------------------------------|---------------|
+| `read()`/`poll()` | 5 kHz, 3 s     | 15,002 samples, 5,001 samples/s       | 0             |
+| `mmap` zero-copy  | 20 kHz, 3 s    | 59,997 samples, 19,998 samples/s      | 0             |
+
+Kernel counters after the run: `produced=75,019`, read-path
+`consumed=15,002`, `overruns=57,287`. The overruns are *expected and
+correct*: they count the read()-path tail being lapped while the mmap
+test ran with no read() consumer draining it — the flight-recorder
+semantics doing exactly what they should. The mmap consumer itself saw
+zero gaps at 20 kHz.
+
+Bringing the module up on this target surfaced two genuine 32-bit ARM
+portability bugs, both fixed in commit `8ae2af7`: `smp_store_release()`
+of the 64-bit head is rejected on armv7 (no native 8-byte atomic
+store), replaced by an ordered high-word/low-word publish; and `u64 %`
+does not link on 32-bit ARM kernels (no `__aeabi_uldivmod`), replaced
+by `div_u64_rem()`.
+
 ## What a real-hardware version would add
 
 - `platform_driver` probe bound by device tree compatible string, `devm_*`
