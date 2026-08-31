@@ -140,12 +140,12 @@ make $MAKEVARS olddefconfig
 # The Pi 3 defconfig builds only the 3 B device tree; a 3 B+ needs its
 # own DTB or the firmware finds nothing to hand the kernel. Append the
 # -plus variant, keeping whatever path prefix the defconfig uses.
-DTSCUR=$(sed -n 's/^BR2_LINUX_KERNEL_INTREE_DTS_NAME="\(.*\)"//p' .config)
+DTSCUR=$(grep '^BR2_LINUX_KERNEL_INTREE_DTS_NAME=' .config | cut -d'"' -f2)
 case "$DTSCUR" in
 *rpi-3-b-plus*)
 	;;
 *rpi-3-b*)
-	DTSPLUS=$(printf '%s' "$DTSCUR" | sed 's/.*\(broadcom\/\)\?bcm2710-rpi-3-b$/&-plus/')
+	DTSPLUS="${DTSCUR##* }-plus"
 	echo "--- adding Pi 3 B+ device tree: $DTSPLUS ---"
 	sed -i "s|^BR2_LINUX_KERNEL_INTREE_DTS_NAME=.*|BR2_LINUX_KERNEL_INTREE_DTS_NAME=\"$DTSCUR $DTSPLUS\"|" .config
 	make $MAKEVARS olddefconfig
