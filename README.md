@@ -16,6 +16,26 @@ Samples are 24-byte timestamped words (sequence number, `CLOCK_MONOTONIC`
 timestamp, channel, simulated 12-bit ADC value) produced at a configurable
 rate up to 100 kHz.
 
+## Quick start
+
+Everything runs through one self-updating entry point, so there is
+never a long command to type:
+
+```sh
+./go            # list the tasks
+./go demo       # build and run the two-path demo
+./go char       # rate sweep + latency under load
+./go overlay    # compile and install the device-tree overlay
+./go build      # start the Buildroot image build
+./go status     # how that build is doing
+```
+
+Each task pulls the latest repo first. First time on a new machine:
+
+```sh
+git clone https://github.com/ambrosiobing/daqring.git && cd daqring && ./go
+```
+
 ## v2: device tree, platform driver, real interrupts
 
 Since v2 the module is a **platform driver probed from the device
