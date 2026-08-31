@@ -36,6 +36,14 @@ run_point() {	# $1 = rate, $2 = label
 	LAT=$(cat $SYSFS/irq_latency 2>/dev/null)
 	printf '%-6s %-6s ach=%-7s gaps=%-4s %s\n' \
 		"$1" "$2" "${ACH:-?}/s" "${GAPS:-?}" "$LAT"
+	# If the run produced nothing parseable, show what it actually said -
+	# guessing from counters alone wastes a round trip.
+	if [ -z "$ACH" ]; then
+		echo "       ---- raw output from the failed run ----"
+		sed 's/^/       /' "$OUT" | head -6
+		echo "       ---- mode=$MODE, dmesg tail ----"
+		dmesg | tail -3 | sed 's/^/       /'
+	fi
 	sudo rmmod daqring 2>/dev/null
 }
 
