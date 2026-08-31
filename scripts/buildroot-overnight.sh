@@ -22,6 +22,7 @@ DEFCONFIG=${DEFCONFIG:-raspberrypi3_defconfig}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 BR=$WORK/buildroot-$BR_VERSION
 LOG=$WORK/build.log
+TARBALL=$WORK/buildroot-$BR_VERSION.tar.gz
 
 if ! mkdir -p "$WORK" 2>/dev/null || [ ! -w "$WORK" ]; then
 	echo "error: $WORK is not writable by $(id -un)." >&2
@@ -45,11 +46,38 @@ if ! command -v bison >/dev/null 2>&1; then
 	}
 fi
 
+# Download with timeouts and retries. A bare "wget -q" can hang forever
+# on a stalled connection (and prints nothing, so the log looks frozen);
+# -4 avoids blackholed IPv6 routes, --continue resumes a partial file,
+# and dot:giga keeps writing progress so the log shows liveness.
+fetch() {
+	echo "--- trying: $1"
+	wget -4 --timeout=30 --tries=3 --continue --progress=dot:giga \
+		-O "$TARBALL" "$1"
+}
+
 if [ ! -d "$BR" ]; then
 	echo "--- fetching buildroot $BR_VERSION ---"
-	wget -q -O "$WORK/buildroot.tar.gz" \
-		"https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.gz"
-	tar -xzf "$WORK/buildroot.tar.gz" -C "$WORK"
+	fetch "https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.gz" ||
+	fetch "https://github.com/buildroot/buildroot/archive/refs/tags/$BR_VERSION.tar.gz" ||
+	# Last resort: an EOL distro's CA bundle may reject a modern chain.
+	wget -4 --timeout=30 --tries=3 --continue --no-check-certificate \
+		--progress=dot:giga -O "$TARBALL" \
+		"https://buildroot.org/downloads/buildroot-$BR_VERSION.tar.gz" || {
+		echo "error: could not download buildroot. check the Pi's network:" >&2
+		echo "       wget -4 -O /dev/null https://buildroot.org/" >&2
+		exit 1
+	}
+
+	echo "--- downloaded $(du -h "$TARBALL" | cut -f1), extracting ---"
+	if ! gzip -t "$TARBALL" 2>/dev/null; then
+		echo "error: $TARBALL is not a valid archive (partial download?)." >&2
+		echo "       delete it and re-run." >&2
+		exit 1
+	fi
+	tar -xzf "$TARBALL" -C "$WORK"
+	# The GitHub tag tarball unpacks without the "buildroot-" prefix.
+	[ -d "$BR" ] || [ ! -d "$WORK/$BR_VERSION" ] || mv "$WORK/$BR_VERSION" "$BR"
 fi
 
 cd "$BR"
