@@ -125,6 +125,29 @@ store), replaced by an ordered high-word/low-word publish; and `u64 %`
 does not link on 32-bit ARM kernels (no `__aeabi_uldivmod`), replaced
 by `div_u64_rem()`.
 
+## Measured results — v2 hardware mode (Pi 3 B+, 31 Aug 2026)
+
+Same board and kernel as the baseline below, now with the overlay
+loaded and every sample produced by a real GPIO interrupt (jumper
+loopback GPIO17→GPIO27), demo at 5 kHz (read path) then 20 kHz (mmap):
+
+**Trigger-to-ISR latency** over 75,045 interrupts, stock (non-RT)
+`4.19.66-v7+` kernel with the desktop running:
+
+| min | avg | max |
+|-----|-----|-----|
+| 2.0 µs | 4.2 µs | 48.8 µs |
+
+| bucket | ≤5 µs | ≤10 µs | ≤20 µs | ≤50 µs | >50 µs |
+|--------|-------|--------|--------|--------|--------|
+| count  | 72,526 | 2,300 | 201 | 18 | 0 |
+
+**Edge accounting:** `pulses=75047`, `irqs=75045` — two edges lost in
+75k at rates up to 20 kHz (0.003%), the honest cost of one interrupt
+per sample; a real card batches samples per IRQ precisely to push this
+ceiling out. Both data paths again completed with **zero sequence
+gaps** (read: 5,001 samples/s; mmap: 19,997 samples/s).
+
 ## What a real-hardware version would add
 
 - `platform_driver` probe bound by device tree compatible string, `devm_*`
