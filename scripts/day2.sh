@@ -28,6 +28,14 @@ echo "=== 2/3 build prerequisites ==="
 sudo apt-get install -y build-essential bison flex bc cpio unzip rsync \
 	file wget python3 libncurses-dev git device-tree-compiler
 
+# Buildroot builds host-m4 1.4.19, whose bundled gnulib does not compile
+# under GCC 15's default -std=gnu23. Having an older compiler available
+# lets the build script sidestep that; harmless if the host gcc is < 15
+# or the package does not exist on this distro.
+sudo apt-get install -y gcc-14 g++-14 2>/dev/null ||
+	sudo apt-get install -y gcc-13 g++-13 2>/dev/null ||
+	echo "(no older gcc available - fine unless host gcc is 15 or newer)"
+
 echo "=== 3/3 launching Buildroot (detached) ==="
 rm -f nohup.out
 nohup ./scripts/buildroot-overnight.sh >/dev/null 2>&1 &
