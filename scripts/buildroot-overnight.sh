@@ -99,11 +99,37 @@ fi
 
 cd "$BR"
 
+# Host compiler choice. GCC 15 defaults to -std=gnu23, where
+# _GL_ATTRIBUTE_NODISCARD expands to a C23 [[...]] attribute in a
+# position C23 does not allow, so the gnulib bundled in m4 1.4.19
+# (host-m4, built by every Buildroot release to date) fails with
+# "expected identifier or '(' before 'int'". Prefer an older host
+# compiler when the default is 15 or newer.
+HOSTCC=${HOSTCC:-gcc}
+HOSTCXX=${HOSTCXX:-g++}
+GCCMAJ=$($HOSTCC -dumpversion 2>/dev/null | cut -d. -f1)
+if [ "${GCCMAJ:-0}" -ge 15 ]; then
+	for v in 14 13 12; do
+		if command -v "gcc-$v" >/dev/null 2>&1 &&
+		   command -v "g++-$v" >/dev/null 2>&1; then
+			HOSTCC=gcc-$v
+			HOSTCXX=g++-$v
+			break
+		fi
+	done
+	if [ "$HOSTCC" = "gcc" ]; then
+		echo "warning: host gcc is $GCCMAJ and no older gcc is installed;" >&2
+		echo "         host-m4 will probably fail. Install gcc-14 g++-14." >&2
+	fi
+fi
+echo "--- host compiler: $HOSTCC ($($HOSTCC -dumpversion 2>/dev/null)) ---"
+MAKEVARS="BR2_EXTERNAL=$REPO/br2-external HOSTCC=$HOSTCC HOSTCXX=$HOSTCXX"
+
 if [ ! -f .config ]; then
 	echo "--- configuring from $DEFCONFIG + daqring fragment ---"
 	make BR2_EXTERNAL="$REPO/br2-external" "$DEFCONFIG"
 	cat "$REPO/br2-external/configs/daqring.fragment" >>.config
-	make BR2_EXTERNAL="$REPO/br2-external" olddefconfig
+	make $MAKEVARS olddefconfig
 fi
 
 # A toolchain choice that did not apply to this target leaves
@@ -114,8 +140,8 @@ fi
 if grep -q '^BR2_TOOLCHAIN_EXTERNAL_CUSTOM=y' .config; then
 	echo "--- unusable external toolchain selected; switching to internal ---"
 	sed -i '/^BR2_TOOLCHAIN_EXTERNAL/d' .config
-	make BR2_EXTERNAL="$REPO/br2-external" olddefconfig
-	make BR2_EXTERNAL="$REPO/br2-external" clean
+	make $MAKEVARS olddefconfig
+	make $MAKEVARS clean
 fi
 
 echo "--- toolchain now selected: ---"
@@ -132,10 +158,10 @@ JOBS=$RAM_GB
 [ "$JOBS" -gt "$CORES" ] && JOBS=$CORES
 echo "--- build host: $CORES cores, ${RAM_GB}G RAM -> BR2_JLEVEL=$JOBS ---"
 sed -i "s/^BR2_JLEVEL=.*/BR2_JLEVEL=$JOBS/" .config
-make BR2_EXTERNAL="$REPO/br2-external" olddefconfig
+make $MAKEVARS olddefconfig
 
 echo "--- building (this is the long part) ---"
-make BR2_EXTERNAL="$REPO/br2-external"
+make $MAKEVARS
 
 echo "=== $(date -u) DONE ==="
 ls -la output/images/
