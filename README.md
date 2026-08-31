@@ -156,6 +156,33 @@ gaps** (read: 5,001 samples/s; mmap: 19,997 samples/s).
 - `dma_alloc_coherent()`/dmaengine descriptors instead of the vmalloc ring
 - runtime PM, and `debugfs` for register dumps
 
+## Buildroot: the module as part of a bootable image
+
+[`br2-external/`](br2-external/) is a `BR2_EXTERNAL` tree that builds
+daqring into a complete Linux image: the module is compiled against the
+Buildroot kernel by the `kernel-module` infrastructure, `daqring_test`
+is cross-compiled into `/usr/bin`, and a rootfs-overlay init script
+loads the module at boot. The result is an SD/USB image whose OS,
+kernel, driver and test client all come out of one reproducible build.
+
+Buildroot cross-compiles, so any Linux host works — including the Pi
+itself. To build overnight on the Pi (an external Bootlin toolchain
+keeps it to roughly 4–6 h rather than days):
+
+```sh
+nohup ./scripts/buildroot-overnight.sh &   # logs to ~/br/build.log
+tail -f ~/br/build.log                      # watch, or check in the morning
+```
+
+Output lands in `~/br/buildroot-*/output/images/sdcard.img`. Flash it
+to a **USB stick** (both Pi 3 B+ and Pi 4 B boot from USB, so the
+development SD card is never touched) — check the device name with
+`lsblk` first, then:
+
+```sh
+sudo dd if=output/images/sdcard.img of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
 ## Design lineage and prior art
 
 Nothing here is invented from scratch — each mechanism follows an

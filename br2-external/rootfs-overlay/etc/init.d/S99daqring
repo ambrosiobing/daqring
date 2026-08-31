@@ -1,0 +1,12 @@
+#!/bin/sh
+# Load the daqring module at boot. Hardware mode if the overlay put
+# the jap,daqring node in the device tree, simulation mode otherwise.
+case "$1" in
+start)
+	modprobe daqring 2>/dev/null \
+		|| insmod /lib/modules/*/extra/daqring.ko 2>/dev/null \
+		|| insmod /lib/modules/*/updates/daqring.ko 2>/dev/null
+	[ -e /dev/daqring ] && echo "daqring: $(cat /sys/class/misc/daqring/mode) mode"
+	;;
+esac
+exit 0

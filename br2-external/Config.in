@@ -1,0 +1,1 @@
+source "$BR2_EXTERNAL_DAQRING_PATH/package/daqring/Config.in"

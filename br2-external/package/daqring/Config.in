@@ -1,0 +1,9 @@
+config BR2_PACKAGE_DAQRING
+	bool "daqring"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Simulated DAQ card: out-of-tree kernel module (built against
+	  the Buildroot kernel), the daqring_test client, and a boot
+	  script that loads the module.
+
+	  https://github.com/ambrosiobing/daqring

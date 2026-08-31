@@ -1,0 +1,16 @@
+# daqring additions, appended to raspberrypi3_defconfig.
+#
+# External Bootlin toolchain: the Pi then only builds the kernel and
+# rootfs, not GCC - the difference between an overnight build and a
+# multi-day one on a Pi 3. If this symbol doesn't exist in your
+# Buildroot release, olddefconfig silently falls back to the internal
+# toolchain (build still succeeds, just much longer).
+BR2_TOOLCHAIN_EXTERNAL=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN=y
+BR2_TOOLCHAIN_EXTERNAL_BOOTLIN_ARMV7_EABIHF_GLIBC_STABLE=y
+
+# 1 GB of RAM: two build jobs, not four.
+BR2_JLEVEL=2
+
+BR2_PACKAGE_DAQRING=y
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_DAQRING_PATH)/rootfs-overlay"
