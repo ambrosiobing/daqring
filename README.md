@@ -165,32 +165,10 @@ is cross-compiled into `/usr/bin`, and a rootfs-overlay init script
 loads the module at boot. The result is an SD/USB image whose OS,
 kernel, driver and test client all come out of one reproducible build.
 
-Buildroot cross-compiles, so any Linux host works — including the Pi
-itself. To build overnight on the Pi (an external Bootlin toolchain
-keeps it to roughly 4–6 h rather than days):
-
-```sh
-nohup ./scripts/buildroot-overnight.sh &   # logs to ~/br/build.log
-tail -f ~/br/build.log                      # watch, or check in the morning
-```
-
-Output lands in `~/br/buildroot-*/output/images/sdcard.img`. Flash it
-to a **USB stick** (both Pi 3 B+ and Pi 4 B boot from USB, so the
-development SD card is never touched) — check the device name with
-`lsblk` first, then:
-
-```sh
-sudo dd if=output/images/sdcard.img of=/dev/sdX bs=4M conv=fsync status=progress
-```
-
-## Building the bootable image (Buildroot)
-
-The module, its device-tree overlay and the test tools are packaged as
-a Buildroot `BR2_EXTERNAL` tree, so a single command produces a
-complete bootable SD/USB image with daqring loaded at startup.
-
 Buildroot is a cross-build system: run it on a Linux workstation (or
-WSL2 on Windows), not on the Pi itself, unless you enjoy waiting.
+WSL2 on Windows). It builds its own toolchain from source, so on a
+workstation expect roughly an hour, and on a Pi 3 expect the better
+part of a day.
 
 ```sh
 sudo apt update && sudo apt install -y git
@@ -198,24 +176,25 @@ git clone https://github.com/ambrosiobing/daqring.git
 cd daqring && ./scripts/day2.sh
 ```
 
-`day2.sh` installs the build prerequisites and launches the build
-detached; it prints how to follow along. Check progress at any time:
+`day2.sh` installs the prerequisites and launches the build detached,
+scaling parallelism to the host (about one job per GB of RAM, capped at
+core count). Follow it at any time with:
 
 ```sh
 ./scripts/status.sh
 ```
 
 The result is `~/br/buildroot-*/output/images/sdcard.img`. Write it to
-a USB stick or spare card - on Linux with the guarded helper (it
-refuses to touch an SD card device or a mounted root/boot filesystem):
+a **USB stick** - both the Pi 3 B+ and Pi 4 B boot from USB, so the
+development SD card is never touched. On Linux use the guarded helper,
+which refuses to write to an SD-card device or to anything holding a
+mounted root/boot filesystem, and asks for confirmation:
 
 ```sh
 sudo ./scripts/flash-image.sh /dev/sdX
 ```
 
-On Windows, use Raspberry Pi Imager's *Use custom* option instead. A
-Pi 3 B+ or Pi 4 boots the resulting image from USB with no SD card
-inserted.
+On Windows, use Raspberry Pi Imager's *Use custom* option instead.
 
 ## Design lineage and prior art
 
