@@ -14,9 +14,13 @@ echo "--- mmap zero-copy path, 20 kHz for 3 s ---"
 sudo ./test/daqring_test mmap 20000 3
 
 echo "--- sysfs ---"
-for f in sample_rate_hz produced overruns running; do
+for f in mode sample_rate_hz produced overruns running irq_latency; do
 	printf '%-16s %s\n' "$f" "$(cat /sys/class/misc/daqring/$f)"
 done
+if [ "$(cat /sys/class/misc/daqring/mode)" = "hardware" ]; then
+	echo "--- irq latency histogram ---"
+	cat /sys/class/misc/daqring/irq_latency_hist
+fi
 
 echo "--- dmesg ---"
 sudo dmesg | grep daqring | tail -n 4

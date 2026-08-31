@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Device tree overlay for the daqring "card" on a Raspberry Pi.
+ *
+ * The card is a jumper wire: GPIO17 (physical pin 11) is the driver's
+ * trigger output, looped to GPIO27 (physical pin 13), which acts as the
+ * card's sample-ready interrupt line.
+ *
+ * Build:    dtc -@ -I dts -O dtb -o daqring.dtbo overlays/daqring-overlay.dts
+ * Install:  sudo cp daqring.dtbo /boot/overlays/
+ *           add "dtoverlay=daqring" to /boot/config.txt, reboot
+ */
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2835";
+
+	fragment@0 {
+		target = <&gpio>;
+		__overlay__ {
+			daqring_pins: daqring_pins {
+				brcm,pins = <17 27>;
+				/* 1 = output (trigger), 0 = input (irq) */
+				brcm,function = <1 0>;
+				/* pull-down on the irq input */
+				brcm,pull = <0 1>;
+			};
+		};
+	};
+
+	fragment@1 {
+		target-path = "/";
+		__overlay__ {
+			daqring {
+				compatible = "jap,daqring";
+				pinctrl-names = "default";
+				pinctrl-0 = <&daqring_pins>;
+				trigger-gpios = <&gpio 17 0>;	/* GPIO_ACTIVE_HIGH */
+				irq-gpios = <&gpio 27 0>;
+				ring-pages = <16>;
+				status = "okay";
+			};
+		};
+	};
+
+	__overrides__ {
+		ring_pages = <&{/fragment@1/__overlay__/daqring}>,"ring-pages:0";
+	};
+};

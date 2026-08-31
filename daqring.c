@@ -2,10 +2,16 @@
 /*
  * daqring - a simulated data-acquisition card driver.
  *
- * Models the kernel side of an FPGA DAQ add-on card without needing the
- * hardware: an hrtimer stands in for the card's sample-ready interrupt,
- * and a vmalloc'd ring buffer stands in for the DMA target. Data reaches
- * user space two ways:
+ * v2: a platform driver probed from the device tree. The "card" is two
+ * GPIO pins joined by a jumper wire: an hrtimer pulses the trigger
+ * output at the sample rate, the looped-back edge arrives as a real
+ * hardware interrupt on the irq input, and the ISR timestamps it,
+ * measures trigger-to-ISR latency, and writes a sample into a
+ * DMA-style ring buffer. Without the device-tree node (or on a board
+ * with no GPIOs) the driver falls back to v1 behaviour: the hrtimer
+ * produces samples directly, in simulation mode.
+ *
+ * Data reaches user space two ways:
  *
  *   1. read()/poll() on /dev/daqring - blocking, copy-based, simple.
  *   2. mmap() of the ring - zero-copy. Page 0 is a header page whose
@@ -17,11 +23,22 @@
  * under /sys/class/misc/daqring/.
  *
  * Locking: `lock` (spinlock, IRQ-safe) protects head/tail/counters and
- * is the only lock the timer callback takes. `cfg_lock` (mutex)
- * serialises configuration paths (rate changes, start/stop, reset).
+ * the latency statistics; it is the only lock the timer callback and
+ * the ISR take. `cfg_lock` (mutex) serialises configuration paths
+ * (rate changes, start/stop, reset).
+ *
+ * Interrupt split: the hardirq half timestamps the edge, updates the
+ * latency histogram and writes the sample slot (the equivalent of
+ * draining a card FIFO in the ISR); the threaded half wakes sleeping
+ * readers, deferring everything the hardirq does not strictly need.
  */
 
 #include <linux/module.h>
+#include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/property.h>
+#include <linux/gpio/consumer.h>
+#include <linux/interrupt.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include <linux/hrtimer.h>
@@ -36,6 +53,7 @@
 #include <linux/wait.h>
 #include <linux/version.h>
 #include <linux/math64.h>
+#include <linux/atomic.h>
 
 #include "daqring.h"
 
@@ -52,10 +70,16 @@ typedef unsigned int __poll_t;
 #define DAQRING_NAME		"daqring"
 #define DAQRING_MAX_BURST	256	/* max samples per read() call */
 #define DAQRING_DEF_RATE_HZ	1000
+#define DAQRING_LAT_BUCKETS	8
 
 static unsigned int ring_pages = 16;
 module_param(ring_pages, uint, 0444);
-MODULE_PARM_DESC(ring_pages, "Pages of sample storage in the ring (default 16)");
+MODULE_PARM_DESC(ring_pages, "Pages of sample storage in the ring (default 16, DT ring-pages wins)");
+
+/* Latency histogram bucket upper bounds, in ns. */
+static const u64 daqring_lat_edge[DAQRING_LAT_BUCKETS] = {
+	5000, 10000, 20000, 50000, 100000, 200000, 500000, ~0ULL,
+};
 
 struct daqring_dev {
 	/* Shared-memory window: header page + sample slots. */
@@ -65,22 +89,37 @@ struct daqring_dev {
 	u32 capacity;
 	size_t shm_size;
 
-	/* Simulated sample-ready interrupt. */
+	/* The "card": trigger output looped to an interrupt input. */
+	bool hw_mode;
+	struct gpio_desc *trigger;
+	struct gpio_desc *irq_gpiod;
+	int irq;
+	atomic64_t toggle_ns;	/* when the last trigger pulse was raised */
+
+	/* Sample clock: pulses the trigger (hw) or produces (sim). */
 	struct hrtimer timer;
 	ktime_t period;
 	u32 rate_hz;
 	bool running;
 	u32 noise;		/* LCG state for the simulated ADC */
 
-	/* Producer/consumer state, guarded by `lock`. */
+	/* Producer/consumer state and stats, guarded by `lock`. */
 	u64 head;
 	u64 tail;
 	u64 consumed;
 	u64 overruns;
+	u64 pulses;		/* trigger edges emitted (hw mode) */
+	u64 lat_cnt;		/* IRQs whose latency was measured */
+	u64 lat_min;
+	u64 lat_max;
+	u64 lat_sum;
+	u32 lat_hist[DAQRING_LAT_BUCKETS];
 	spinlock_t lock;
 
 	struct mutex cfg_lock;
 	wait_queue_head_t waitq;
+
+	struct platform_device *pdev;
 };
 
 static struct daqring_dev ddev;
@@ -117,21 +156,14 @@ static void daqring_publish_head(struct daqring_dev *dev)
 #endif
 }
 
-/*
- * Timer callback - runs in hardirq context, exactly like the ISR of the
- * real card would. Writes one sample slot, then publishes the new head.
- */
-static enum hrtimer_restart daqring_tick(struct hrtimer *t)
+/* Write one sample into the ring. Caller holds `lock`. */
+static void daqring_produce_locked(struct daqring_dev *dev, u64 timestamp_ns)
 {
-	struct daqring_dev *dev = container_of(t, struct daqring_dev, timer);
 	struct daqring_sample *slot;
-	unsigned long flags;
-
-	spin_lock_irqsave(&dev->lock, flags);
 
 	slot = &dev->slots[daqring_slot(dev, dev->head)];
 	slot->seq = dev->head;
-	slot->timestamp_ns = ktime_get_ns();
+	slot->timestamp_ns = timestamp_ns;
 	slot->channel = (u32)(dev->head & 0x3);
 	/* 12-bit "ADC": sawtooth carrier plus LCG noise in the low bits. */
 	dev->noise = dev->noise * 1664525u + 1013904223u;
@@ -147,13 +179,79 @@ static enum hrtimer_restart daqring_tick(struct hrtimer *t)
 	}
 
 	daqring_publish_head(dev);
+}
 
-	spin_unlock_irqrestore(&dev->lock, flags);
+/*
+ * Sample clock, hardirq context. In hardware mode it only pulses the
+ * trigger line - the sample is produced when the edge comes back as an
+ * interrupt. In simulation mode it produces the sample directly (v1
+ * behaviour).
+ */
+static enum hrtimer_restart daqring_tick(struct hrtimer *t)
+{
+	struct daqring_dev *dev = container_of(t, struct daqring_dev, timer);
+	unsigned long flags;
 
-	wake_up_interruptible(&dev->waitq);
+	if (dev->hw_mode) {
+		atomic64_set(&dev->toggle_ns, ktime_get_ns());
+		gpiod_set_value(dev->trigger, 1);
+		gpiod_set_value(dev->trigger, 0);
+		spin_lock_irqsave(&dev->lock, flags);
+		dev->pulses++;
+		spin_unlock_irqrestore(&dev->lock, flags);
+	} else {
+		spin_lock_irqsave(&dev->lock, flags);
+		daqring_produce_locked(dev, ktime_get_ns());
+		spin_unlock_irqrestore(&dev->lock, flags);
+		wake_up_interruptible(&dev->waitq);
+	}
 
 	hrtimer_forward_now(t, dev->period);
 	return HRTIMER_RESTART;
+}
+
+/*
+ * Hardirq half: timestamp the edge, account trigger-to-ISR latency,
+ * write the sample - the moral equivalent of reading the card's FIFO
+ * in the ISR. Wake-ups are deferred to the threaded half.
+ */
+static irqreturn_t daqring_irq(int irq, void *data)
+{
+	struct daqring_dev *dev = data;
+	u64 now = ktime_get_ns();
+	u64 t = (u64)atomic64_read(&dev->toggle_ns);
+	unsigned long flags;
+	int i;
+
+	spin_lock_irqsave(&dev->lock, flags);
+	if (t && now > t) {
+		u64 d = now - t;
+
+		dev->lat_cnt++;
+		dev->lat_sum += d;
+		if (d < dev->lat_min)
+			dev->lat_min = d;
+		if (d > dev->lat_max)
+			dev->lat_max = d;
+		for (i = 0; i < DAQRING_LAT_BUCKETS; i++) {
+			if (d <= daqring_lat_edge[i]) {
+				dev->lat_hist[i]++;
+				break;
+			}
+		}
+	}
+	daqring_produce_locked(dev, now);
+	spin_unlock_irqrestore(&dev->lock, flags);
+
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t daqring_irq_thread(int irq, void *data)
+{
+	struct daqring_dev *dev = data;
+
+	wake_up_interruptible(&dev->waitq);
+	return IRQ_HANDLED;
 }
 
 static bool daqring_data_ready(struct daqring_dev *dev)
@@ -319,9 +417,16 @@ static long daqring_ioctl(struct file *file, unsigned int cmd,
 			dev->tail = 0;
 			dev->consumed = 0;
 			dev->overruns = 0;
+			dev->pulses = 0;
+			dev->lat_cnt = 0;
+			dev->lat_sum = 0;
+			dev->lat_min = ~0ULL;
+			dev->lat_max = 0;
+			memset(dev->lat_hist, 0, sizeof(dev->lat_hist));
 			dev->hdr->head = 0;
 			dev->hdr->overruns = 0;
 			spin_unlock_irqrestore(&dev->lock, flags);
+			atomic64_set(&dev->toggle_ns, 0);
 		}
 		mutex_unlock(&dev->cfg_lock);
 		return ret;
@@ -371,7 +476,7 @@ static const struct file_operations daqring_fops = {
 	.mmap		= daqring_mmap,
 };
 
-/* ---- sysfs: /sys/class/misc/daqring/{sample_rate_hz,produced,...} ---- */
+/* ---- sysfs: /sys/class/misc/daqring/ ---- */
 
 static ssize_t sample_rate_hz_show(struct device *dev,
 				   struct device_attribute *attr, char *buf)
@@ -415,11 +520,69 @@ static ssize_t running_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(running);
 
+static ssize_t mode_show(struct device *dev,
+			 struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%s\n",
+			  ddev.hw_mode ? "hardware" : "simulation");
+}
+static DEVICE_ATTR_RO(mode);
+
+static ssize_t irq_latency_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	u64 cnt, mn, mx, sum, pulses, avg;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ddev.lock, flags);
+	cnt = ddev.lat_cnt;
+	mn = ddev.lat_min;
+	mx = ddev.lat_max;
+	sum = ddev.lat_sum;
+	pulses = ddev.pulses;
+	spin_unlock_irqrestore(&ddev.lock, flags);
+
+	avg = cnt ? div64_u64(sum, cnt) : 0;
+	if (!cnt)
+		mn = 0;
+
+	return sysfs_emit(buf,
+		"pulses=%llu irqs=%llu min_ns=%llu avg_ns=%llu max_ns=%llu\n",
+		pulses, cnt, mn, avg, mx);
+}
+static DEVICE_ATTR_RO(irq_latency);
+
+static ssize_t irq_latency_hist_show(struct device *dev,
+				     struct device_attribute *attr, char *buf)
+{
+	static const char * const label[DAQRING_LAT_BUCKETS] = {
+		"<=5us", "<=10us", "<=20us", "<=50us",
+		"<=100us", "<=200us", "<=500us", ">500us",
+	};
+	u32 hist[DAQRING_LAT_BUCKETS];
+	unsigned long flags;
+	ssize_t len = 0;
+	int i;
+
+	spin_lock_irqsave(&ddev.lock, flags);
+	memcpy(hist, ddev.lat_hist, sizeof(hist));
+	spin_unlock_irqrestore(&ddev.lock, flags);
+
+	for (i = 0; i < DAQRING_LAT_BUCKETS; i++)
+		len += scnprintf(buf + len, PAGE_SIZE - len, "%-8s %u\n",
+				 label[i], hist[i]);
+	return len;
+}
+static DEVICE_ATTR_RO(irq_latency_hist);
+
 static struct attribute *daqring_attrs[] = {
 	&dev_attr_sample_rate_hz.attr,
 	&dev_attr_produced.attr,
 	&dev_attr_overruns.attr,
 	&dev_attr_running.attr,
+	&dev_attr_mode.attr,
+	&dev_attr_irq_latency.attr,
+	&dev_attr_irq_latency_hist.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(daqring);
@@ -431,22 +594,30 @@ static struct miscdevice daqring_miscdev = {
 	.groups	= daqring_groups,
 };
 
-static int __init daqring_init(void)
+/* ---- platform driver ---- */
+
+static int daqring_probe(struct platform_device *pdev)
 {
+	struct device *d = &pdev->dev;
 	struct daqring_dev *dev = &ddev;
+	u32 pages = ring_pages;
 	int ret;
 
-	if (ring_pages < 1 || ring_pages > 1024)
+	if (dev->pdev)
+		return -EBUSY;	/* single instance */
+
+	device_property_read_u32(d, "ring-pages", &pages);
+	if (pages < 1 || pages > 1024)
 		return -EINVAL;
 
-	dev->shm_size = (size_t)(ring_pages + 1) * PAGE_SIZE;
+	dev->shm_size = (size_t)(pages + 1) * PAGE_SIZE;
 	dev->shm = vmalloc_user(dev->shm_size);
 	if (!dev->shm)
 		return -ENOMEM;
 
 	dev->hdr = dev->shm;
 	dev->slots = dev->shm + PAGE_SIZE;
-	dev->capacity = (u32)(ring_pages * PAGE_SIZE /
+	dev->capacity = (u32)(pages * PAGE_SIZE /
 			      sizeof(struct daqring_sample));
 
 	dev->hdr->capacity = dev->capacity;
@@ -456,6 +627,8 @@ static int __init daqring_init(void)
 	spin_lock_init(&dev->lock);
 	mutex_init(&dev->cfg_lock);
 	init_waitqueue_head(&dev->waitq);
+	atomic64_set(&dev->toggle_ns, 0);
+	dev->lat_min = ~0ULL;
 
 	dev->rate_hz = DAQRING_DEF_RATE_HZ;
 	dev->period = ns_to_ktime(NSEC_PER_SEC / dev->rate_hz);
@@ -469,20 +642,58 @@ static int __init daqring_init(void)
 	dev->timer.function = daqring_tick;
 #endif
 
-	ret = misc_register(&daqring_miscdev);
-	if (ret) {
-		vfree(dev->shm);
-		return ret;
+	/* The card's two lines; absent on the fallback sim device. */
+	dev->trigger = devm_gpiod_get_optional(d, "trigger", GPIOD_OUT_LOW);
+	if (IS_ERR(dev->trigger)) {
+		ret = PTR_ERR(dev->trigger);
+		goto err_free;
+	}
+	dev->irq_gpiod = devm_gpiod_get_optional(d, "irq", GPIOD_IN);
+	if (IS_ERR(dev->irq_gpiod)) {
+		ret = PTR_ERR(dev->irq_gpiod);
+		goto err_free;
 	}
 
-	pr_info("daqring: ready, %u slots (%u pages), default %u Hz\n",
-		dev->capacity, ring_pages, dev->rate_hz);
+	if (dev->trigger && dev->irq_gpiod) {
+		dev->irq = gpiod_to_irq(dev->irq_gpiod);
+		if (dev->irq < 0) {
+			ret = dev->irq;
+			goto err_free;
+		}
+		ret = devm_request_threaded_irq(d, dev->irq, daqring_irq,
+						daqring_irq_thread,
+						IRQF_TRIGGER_RISING,
+						DAQRING_NAME, dev);
+		if (ret)
+			goto err_free;
+		dev->hw_mode = true;
+	} else {
+		dev->hw_mode = false;
+		dev_warn(d, "no trigger/irq GPIOs, running in simulation mode\n");
+	}
+
+	ret = misc_register(&daqring_miscdev);
+	if (ret)
+		goto err_free;
+
+	dev->pdev = pdev;
+	platform_set_drvdata(pdev, dev);
+
+	dev_info(d, "ready: %s mode, %u slots (%u pages), default %u Hz%s\n",
+		 dev->hw_mode ? "hardware" : "simulation",
+		 dev->capacity, pages, dev->rate_hz,
+		 dev->hw_mode ? ", irq armed" : "");
 	return 0;
+
+err_free:
+	vfree(dev->shm);
+	dev->shm = NULL;
+	return ret;
 }
 
-static void __exit daqring_exit(void)
+static void __daqring_teardown(struct platform_device *pdev)
 {
-	struct daqring_dev *dev = &ddev;
+	struct daqring_dev *dev = platform_get_drvdata(pdev);
 
 	mutex_lock(&dev->cfg_lock);
 	__daqring_stop(dev);
@@ -490,8 +701,77 @@ static void __exit daqring_exit(void)
 
 	misc_deregister(&daqring_miscdev);
 	vfree(dev->shm);
-	pr_info("daqring: unloaded, produced=%llu overruns=%llu\n",
-		dev->head, dev->overruns);
+	dev->shm = NULL;
+	dev->pdev = NULL;
+
+	dev_info(&pdev->dev, "unloaded, produced=%llu overruns=%llu\n",
+		 dev->head, dev->overruns);
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+static void daqring_remove(struct platform_device *pdev)
+{
+	__daqring_teardown(pdev);
+}
+#else
+static int daqring_remove(struct platform_device *pdev)
+{
+	__daqring_teardown(pdev);
+	return 0;
+}
+#endif
+
+static const struct of_device_id daqring_of_match[] = {
+	{ .compatible = "jap,daqring" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, daqring_of_match);
+
+static struct platform_driver daqring_driver = {
+	.probe	= daqring_probe,
+	.remove	= daqring_remove,
+	.driver	= {
+		.name		= DAQRING_NAME,
+		.of_match_table	= daqring_of_match,
+	},
+};
+
+/*
+ * If no device-tree node describes the card, register a bare platform
+ * device so the driver still binds (by name) and runs in simulation
+ * mode - keeps the module usable on any machine, DT or not.
+ */
+static struct platform_device *daqring_sim_pdev;
+
+static int __init daqring_init(void)
+{
+	struct device_node *np;
+	int ret;
+
+	ret = platform_driver_register(&daqring_driver);
+	if (ret)
+		return ret;
+
+	np = of_find_compatible_node(NULL, NULL, "jap,daqring");
+	if (np) {
+		of_node_put(np);
+	} else {
+		daqring_sim_pdev = platform_device_register_simple(
+					DAQRING_NAME, -1, NULL, 0);
+		if (IS_ERR(daqring_sim_pdev)) {
+			ret = PTR_ERR(daqring_sim_pdev);
+			platform_driver_unregister(&daqring_driver);
+			return ret;
+		}
+	}
+	return 0;
+}
+
+static void __exit daqring_exit(void)
+{
+	if (daqring_sim_pdev)
+		platform_device_unregister(daqring_sim_pdev);
+	platform_driver_unregister(&daqring_driver);
 }
 
 module_init(daqring_init);
@@ -499,5 +779,5 @@ module_exit(daqring_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Joseph Ambrose Pagaran");
-MODULE_DESCRIPTION("Simulated DAQ card: hrtimer 'IRQ' feeding a mmap-able ring buffer");
-MODULE_VERSION("1.0");
+MODULE_DESCRIPTION("Simulated DAQ card: DT-probed platform driver, GPIO-loopback IRQ, mmap ring");
+MODULE_VERSION("2.0");

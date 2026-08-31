@@ -16,6 +16,35 @@ Samples are 24-byte timestamped words (sequence number, `CLOCK_MONOTONIC`
 timestamp, channel, simulated 12-bit ADC value) produced at a configurable
 rate up to 100 kHz.
 
+## v2: device tree, platform driver, real interrupts
+
+Since v2 the module is a **platform driver probed from the device
+tree**, and the "card" is real hardware in miniature: a jumper wire
+from GPIO17 (pin 11) to GPIO27 (pin 13). An hrtimer pulses the trigger
+output at the sample rate; the looped-back edge arrives as a **genuine
+hardware interrupt** through the SoC's GPIO block. The hardirq half
+timestamps the edge, updates a trigger-to-ISR **latency histogram**
+(`irq_latency`, `irq_latency_hist` in sysfs) and writes the sample —
+the equivalent of draining a card FIFO in the ISR; the threaded half
+(`request_threaded_irq`) wakes sleeping readers.
+
+The [overlay](overlays/daqring-overlay.dts) declares the node
+(`compatible = "jap,daqring"`, `trigger-gpios`, `irq-gpios`,
+`ring-pages`). Without it — no overlay loaded, no wire, or a machine
+with no GPIOs at all — probe falls back to **simulation mode** (v1
+behaviour, tagged `v1.0`): the driver registers a bare platform device
+so it binds by name and the hrtimer produces samples directly. The
+active mode is reported in `dmesg` and `/sys/class/misc/daqring/mode`.
+
+Install on a Raspberry Pi:
+
+```sh
+sudo apt install -y device-tree-compiler   # if dtc is missing
+make dtbo && make install-overlay          # copies .dtbo, edits config.txt
+sudo reboot                                # loader applies the overlay
+make && sudo insmod daqring.ko             # dmesg: "ready: hardware mode"
+```
+
 ## Two data paths
 
 1. **`read()`/`poll()`** on `/dev/daqring` — blocking, copy-based. Samples

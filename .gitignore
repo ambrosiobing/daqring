@@ -13,3 +13,6 @@ modules.order
 
 # user-space test binary
 test/daqring_test
+
+# compiled overlay
+daqring.dtbo
