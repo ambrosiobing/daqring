@@ -38,6 +38,16 @@
 
 #include "daqring.h"
 
+/* Compatibility down to the 4.9-era kernels on old Raspberry Pi OS. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
+#define sysfs_emit(buf, fmt, ...) scnprintf(buf, PAGE_SIZE, fmt, ##__VA_ARGS__)
+#endif
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 16, 0)
+typedef unsigned int __poll_t;
+#define EPOLLIN		POLLIN
+#define EPOLLRDNORM	POLLRDNORM
+#endif
+
 #define DAQRING_NAME		"daqring"
 #define DAQRING_MAX_BURST	256	/* max samples per read() call */
 #define DAQRING_DEF_RATE_HZ	1000
