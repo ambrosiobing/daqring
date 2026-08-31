@@ -17,8 +17,10 @@ DAQRING_DEBUG=1
 export DAQRING_DEBUG
 OUT=/tmp/daqring_run.txt
 
-[ -f daqring.ko ] || make module || exit 1
-[ -x test/daqring_test ] || make test/daqring_test || exit 1
+# Always rebuild. Conditioning this on the files merely *existing*
+# meant a pulled-in source fix was silently never compiled - make
+# already knows when nothing has changed.
+make module test/daqring_test || exit 1
 
 run_point() {	# $1 = rate, $2 = label
 	sudo rmmod daqring 2>/dev/null
