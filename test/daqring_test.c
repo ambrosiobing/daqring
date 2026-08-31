@@ -144,8 +144,7 @@ static int run_mmap(int fd, int seconds)
 
 	printf("mapped %u bytes, %u slots\n", shm_bytes, capacity);
 	if (getenv("DAQRING_DEBUG"))
-		fprintf(stderr, "[dbg] mapped, entering consume loop
-");
+		fprintf(stderr, "[dbg] mapped, entering consume loop\n");
 
 	/* Start consuming from wherever the producer is right now. */
 	tail = load_head(hdr);
