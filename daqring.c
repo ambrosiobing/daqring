@@ -35,6 +35,7 @@
 #include <linux/mutex.h>
 #include <linux/wait.h>
 #include <linux/version.h>
+#include <linux/math64.h>
 
 #include "daqring.h"
 
@@ -85,6 +86,38 @@ struct daqring_dev {
 static struct daqring_dev ddev;
 
 /*
+ * Ring slot for a given sample count. div_u64_rem instead of plain
+ * `%`: 32-bit ARM kernels provide no __aeabi_uldivmod for u64 modulo.
+ */
+static u32 daqring_slot(const struct daqring_dev *dev, u64 seq)
+{
+	u32 rem;
+
+	div_u64_rem(seq, dev->capacity, &rem);
+	return rem;
+}
+
+/*
+ * Publish the new head to the mmap header; the sample slot must be
+ * visible first. On 64-bit this is one release store. A 32-bit CPU
+ * cannot store 8 bytes atomically (smp_store_release rejects it at
+ * compile time), so publish high word before low: a torn read is then
+ * only possible at the 2^32 wrap and only ever jumps forward, which
+ * consumers already handle as an overrun resync. Little-endian layout
+ * assumed (true of ARM and x86).
+ */
+static void daqring_publish_head(struct daqring_dev *dev)
+{
+#ifdef CONFIG_64BIT
+	smp_store_release(&dev->hdr->head, dev->head);
+#else
+	smp_wmb();
+	WRITE_ONCE(((u32 *)&dev->hdr->head)[1], upper_32_bits(dev->head));
+	WRITE_ONCE(((u32 *)&dev->hdr->head)[0], lower_32_bits(dev->head));
+#endif
+}
+
+/*
  * Timer callback - runs in hardirq context, exactly like the ISR of the
  * real card would. Writes one sample slot, then publishes the new head.
  */
@@ -96,7 +129,7 @@ static enum hrtimer_restart daqring_tick(struct hrtimer *t)
 
 	spin_lock_irqsave(&dev->lock, flags);
 
-	slot = &dev->slots[dev->head % dev->capacity];
+	slot = &dev->slots[daqring_slot(dev, dev->head)];
 	slot->seq = dev->head;
 	slot->timestamp_ns = ktime_get_ns();
 	slot->channel = (u32)(dev->head & 0x3);
@@ -113,8 +146,7 @@ static enum hrtimer_restart daqring_tick(struct hrtimer *t)
 		dev->hdr->overruns = dev->overruns;
 	}
 
-	/* Slot contents must be visible before the new head is. */
-	smp_store_release(&dev->hdr->head, dev->head);
+	daqring_publish_head(dev);
 
 	spin_unlock_irqrestore(&dev->lock, flags);
 
@@ -171,7 +203,7 @@ static ssize_t daqring_read(struct file *file, char __user *ubuf,
 	avail = dev->head - dev->tail;
 	n = min_t(u64, avail, nsamp);
 	for (i = 0; i < n; i++)
-		tmp[i] = dev->slots[(dev->tail + i) % dev->capacity];
+		tmp[i] = dev->slots[daqring_slot(dev, dev->tail + i)];
 	dev->tail += n;
 	dev->consumed += n;
 	spin_unlock_irqrestore(&dev->lock, flags);

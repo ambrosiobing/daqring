@@ -18,7 +18,7 @@ module:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
 test/daqring_test: test/daqring_test.c include/daqring.h
-	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ test/daqring_test.c
+	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ test/daqring_test.c -latomic
 
 load: module
 	sudo insmod daqring.ko
