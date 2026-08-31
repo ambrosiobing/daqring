@@ -33,9 +33,16 @@ echo "=== $(date -u) starting: $BR_VERSION / $DEFCONFIG ==="
 
 # Build-time prerequisites (harmless if already present).
 if ! command -v bison >/dev/null 2>&1; then
-	sudo apt-get update
+	# An EOL distro's mirrors may 404; that is not fatal on its own,
+	# the packages may still be installable from the archive host.
+	sudo apt-get update || echo "warning: apt-get update failed, continuing"
 	sudo apt-get install -y build-essential bison flex bc cpio unzip rsync \
-		file wget python3 libncurses-dev git
+		file wget python3 libncurses-dev git || {
+		echo "error: could not install build prerequisites." >&2
+		echo "       on an EOL Raspbian, repoint /etc/apt/sources.list" >&2
+		echo "       at legacy.raspbian.org first." >&2
+		exit 1
+	}
 fi
 
 if [ ! -d "$BR" ]; then
