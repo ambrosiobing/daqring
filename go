@@ -14,6 +14,8 @@
 #   ./go flash /dev/sdX    write the built image to a USB stick
 #   ./go log         last 40 lines of the build log
 #   ./go cool        kill stray CPU load, show temperature
+#   ./go verify      check the built image contains driver + overlay
+#   ./go export      copy the image to the Windows desktop (from WSL)
 #
 # Every task updates the repo first, so this file is the only thing
 # worth remembering.
@@ -69,6 +71,13 @@ flash)
 	;;
 log)
 	exec tail -40 "${WORK:-$HOME/br}/build.log"
+	;;
+verify)
+	exec sh ./scripts/verify-image.sh
+	;;
+export)
+	shift
+	exec sh ./scripts/export-image.sh "$@"
 	;;
 cool)
 	pkill -f 'while :; do :; done' 2>/dev/null &&
