@@ -324,6 +324,18 @@ per point:
 limit was active, normal for a 3 B+ above 60 °C and worth knowing when
 reading the tail latencies.)
 
+A separate 20 kHz demo run on 6.18 over **75,018 interrupts, none
+lost**, gives the distribution rather than just the extremes:
+
+| ≤5 µs | ≤10 µs | ≤20 µs | ≤50 µs | >50 µs |
+|---|---|---|---|---|
+| 65,826 (87.7%) | 8,438 | 752 | 2 | **0** |
+
+min 1.46 µs, avg 3.42 µs, max 32.2 µs — the worst case moves between
+runs (12–32 µs) while the bulk of the distribution barely shifts, which
+is the usual signature of occasional contention rather than a
+systematic cost.
+
 Compared at 20 kHz idle, the same board and wire:
 
 | Kernel | Word size | avg | max | Edges lost |
