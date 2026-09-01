@@ -36,6 +36,13 @@ Each task pulls the latest repo first. First time on a new machine:
 git clone https://github.com/ambrosiobing/daqring.git && cd daqring && ./go
 ```
 
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for plain-text
+diagrams: the layered architecture, a real card mapped onto its
+stand-in, the per-sample sequence, the ring and its wrap, the 64-bit
+publish across a 32-bit boundary, the boot flow, and an MVP →
+intermediate → advanced roadmap against each of the five platform
+responsibilities.
+
 ## v2: device tree, platform driver, real interrupts
 
 Since v2 the module is a **platform driver probed from the device
