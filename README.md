@@ -301,6 +301,48 @@ LED, no green activity - the boot ROM's USB mass-storage window is
 short and many drives miss it), so the image was written to the
 microSD card instead. The image itself is identical either way.
 
+## Three kernels, one wire (Pi 3 B+)
+
+The same driver, overlay and jumper wire, measured on three different
+kernels spanning six years and both word sizes. Nothing in the source
+changes between them; the version guards and the 32/64-bit paths are
+selected at build time.
+
+**Raspberry Pi OS Lite 64-bit, `6.18.34+rpt-rpi-v8`, hardware mode**, 5 s
+per point:
+
+| Rate | Achieved | Gaps | Pulses | IRQs | Lost | min | avg | max |
+|---|---|---|---|---|---|---|---|---|
+| 1 kHz  | 1,000/s  | 0 | 5,000   | 5,000   | 0 | 1.46 | 2.76 | 16.0 |
+| 5 kHz  | 5,000/s  | 0 | 25,002  | 25,002  | 0 | 1.41 | 2.11 | 25.1 |
+| 10 kHz | 9,999/s  | 0 | 50,004  | 50,004  | 0 | 1.25 | 2.05 | 16.2 |
+| 20 kHz | 19,999/s | 0 | 100,011 | 100,011 | 0 | 1.30 | 2.00 | 14.5 |
+| 50 kHz | 49,997/s | 0 | 250,038 | 250,038 | 0 | 1.30 | 1.91 | 12.2 |
+| 20 kHz, 4 cores loaded | 19,999/s | 0 | — | = pulses | 0 | 1.30 | 2.33 | 13.7 |
+
+(Board reported 63.4 °C and `throttled=0x80008` — the soft temperature
+limit was active, normal for a 3 B+ above 60 °C and worth knowing when
+reading the tail latencies.)
+
+Compared at 20 kHz idle, the same board and wire:
+
+| Kernel | Word size | avg | max | Edges lost |
+|---|---|---|---|---|
+| 4.19.66 (Raspbian, desktop) | 32-bit | 4.3 µs | 64.7 µs | 22 in 99,996 |
+| 6.18.34 (Raspberry Pi OS Lite) | 64-bit | **2.0 µs** | **14.5 µs** | **0 in 100,011** |
+
+The Buildroot 6.1.61 image sits between them on average (8.7 µs at
+2 kHz — a different operating point, so not directly comparable) but
+shares the modern kernels' tight tail: 13.5 µs worst case.
+
+Two things worth taking from this. **The interrupt-per-sample ceiling
+is not a property of the hardware alone** - on 4.19 a fraction of edges
+went missing above 20 kHz, and on 6.18 the same board at the same rates
+loses none, so what looked like a hardware limit was largely a kernel
+one. And **the worst case improved by 4.5×** across the kernel jump
+while the average only halved, which is the number that decides whether
+an acquisition system drops samples.
+
 ## Design lineage and prior art
 
 Nothing here is invented from scratch — each mechanism follows an
