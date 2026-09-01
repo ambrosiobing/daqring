@@ -17,7 +17,9 @@ else
 		E=$(grep -nE "^make(\[[0-9]+\])?: \*\*\*" "$LOG" | tail -1 | cut -d: -f1)
 		if [ -n "$E" ] && [ "${E:-0}" -gt "${D:-0}" ]; then
 			echo "NOT running - BUILD FAILED. Last error:"
-			sed -n "$((E > 3 ? E - 3 : 1)),${E}p" "$LOG" | cut -c1-110
+			S=$((E - 3))
+			[ "$S" -lt 1 ] && S=1
+			sed -n "${S},${E}p" "$LOG" | cut -c1-110
 		elif [ -n "$D" ]; then
 			echo "NOT running - FINISHED SUCCESSFULLY"
 		else
