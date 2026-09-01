@@ -25,11 +25,16 @@ dtbo: daqring.dtbo
 daqring.dtbo: overlays/daqring-overlay.dts
 	dtc -@ -I dts -O dtb -o $@ overlays/daqring-overlay.dts
 
+# Bookworm and later mount the boot partition at /boot/firmware;
+# older releases use /boot.
+BOOTDIR := $(shell test -d /boot/firmware && echo /boot/firmware || echo /boot)
+
 install-overlay: daqring.dtbo
-	sudo cp daqring.dtbo /boot/overlays/
-	@grep -q '^dtoverlay=daqring' /boot/config.txt || \
-		echo 'dtoverlay=daqring' | sudo tee -a /boot/config.txt
-	@echo "overlay installed - reboot to apply"
+	sudo mkdir -p $(BOOTDIR)/overlays
+	sudo cp daqring.dtbo $(BOOTDIR)/overlays/
+	@grep -q '^dtoverlay=daqring' $(BOOTDIR)/config.txt || \
+		echo 'dtoverlay=daqring' | sudo tee -a $(BOOTDIR)/config.txt
+	@echo "overlay installed in $(BOOTDIR) - reboot to apply"
 
 load: module
 	sudo insmod daqring.ko
