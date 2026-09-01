@@ -180,6 +180,21 @@ echo "--- build host: $CORES cores, ${RAM_GB}G RAM -> BR2_JLEVEL=$JOBS ---"
 sed -i "s/^BR2_JLEVEL=.*/BR2_JLEVEL=$JOBS/" .config
 make $MAKEVARS olddefconfig
 
+# Our overlay has to be dropped into rpi-firmware/ before genimage
+# packs the boot partition, so hook post-image and put ourselves ahead
+# of the Pi's own post-image script (which is what runs genimage).
+POSTIMG=$(grep '^BR2_ROOTFS_POST_IMAGE_SCRIPT=' .config | cut -d'"' -f2)
+OURPOST="$REPO/br2-external/board/post-image.sh"
+case "$POSTIMG" in
+*daqring*)
+	;;
+*)
+	echo "--- adding overlay post-image hook ---"
+	sed -i "s|^BR2_ROOTFS_POST_IMAGE_SCRIPT=.*|BR2_ROOTFS_POST_IMAGE_SCRIPT=\"$OURPOST $POSTIMG\"|" .config
+	make $MAKEVARS olddefconfig
+	;;
+esac
+
 echo "--- building (this is the long part) ---"
 make $MAKEVARS
 
