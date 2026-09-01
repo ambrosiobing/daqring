@@ -252,6 +252,55 @@ sudo ./scripts/flash-image.sh /dev/sdX
 
 On Windows, use Raspberry Pi Imager's *Use custom* option instead.
 
+## Running from the Buildroot image (Pi 3 B+, 1 Sep 2026)
+
+The image boots, loads the driver from its own init script, and comes
+up in **hardware** mode - the overlay in the boot partition is found,
+the platform driver binds to the `jap,daqring` node, and the interrupt
+is armed before login:
+
+```
+daqring daqring: ready: hardware mode, 2730 slots (16 pages), default 1000 Hz, irq armed
+Welcome to Buildroot
+buildroot login: root
+# cat /sys/class/misc/daqring/mode
+hardware
+# daqring_test mmap 2000 3
+mapped 69632 bytes, 2730 slots
+consumed 5999 samples in 3.00 s (2000 samples/s), 0 sequence gaps
+kernel:  produced=6015 consumed=0 overruns=3285 rate=2000 Hz
+# cat /sys/class/misc/daqring/irq_latency
+pulses=6019 irqs=6019 min_ns=4791 avg_ns=8696 max_ns=13490
+```
+
+Everything in that transcript - bootloader, kernel 6.1.61, root
+filesystem, the module, the overlay and `daqring_test` - comes from one
+`./go build`.
+
+Two things worth comparing against the Raspbian numbers above, on the
+same board and the same wire:
+
+| | Raspbian, 4.19.66 | Buildroot, 6.1.61 |
+|---|---|---|
+| avg trigger-to-ISR | 4.2 µs | 8.7 µs |
+| worst case | 48.8 µs | **13.5 µs** |
+| edges lost | 2 in 75,045 | **0 in 6,019** |
+
+The Buildroot image is slower on average but far tighter at the tail -
+a 3.6× lower worst case. For acquisition work that is the better
+trade: jitter is what costs you samples, not average latency. A minimal
+image has almost nothing else contending for the CPU, which is exactly
+why instruments ship a stripped root filesystem rather than a desktop.
+
+This also confirmed the user-space fix for the read-only 64-bit head
+load: 2 kHz is the rate that used to segfault, and it now runs with
+`pulses == irqs` and zero sequence gaps.
+
+**Note on booting:** USB-stick boot did not work on this Pi 3 B+ (red
+LED, no green activity - the boot ROM's USB mass-storage window is
+short and many drives miss it), so the image was written to the
+microSD card instead. The image itself is identical either way.
+
 ## Design lineage and prior art
 
 Nothing here is invented from scratch — each mechanism follows an
