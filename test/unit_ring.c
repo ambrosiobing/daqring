@@ -132,7 +132,14 @@ static void *reader(void *arg)
 	struct reader_result *res = calloc(1, sizeof(*res));
 	uint64_t prev = 0;
 
-	while (!atomic_load(&r->stop)) {
+	for (;;) {
+		/*
+		 * Read `stop` before the head, so that once the producer has
+		 * finished (stop set after its last publish, with release
+		 * semantics) this iteration is guaranteed to observe the final
+		 * value rather than racing past it.
+		 */
+		int done = atomic_load(&r->stop);
 		uint64_t h = daqring_load_head(&r->hdr);
 		uint64_t w = atomic_load_explicit(&r->written, memory_order_acquire);
 
@@ -149,6 +156,8 @@ static void *reader(void *arg)
 		if (h > res->max_seen)
 			res->max_seen = h;
 		prev = h;
+		if (done)
+			break;
 	}
 	return res;
 }

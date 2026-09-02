@@ -31,15 +31,19 @@ terminal, and in a PDF.
    │  ci.yml  (every push, every pull request)          ~5 minutes   │
    │                                                                 │
    │   ┌────────┐     ┌────────┐     ┌────────────────────────────┐  │
-   │   │  lint  │     │  unit  │────►│  module  (x86-64)          │  │
-   │   │        │     │        │     │  module  (ARM64)           │  │
-   │   │ dtc    │     │ ABI    │     │                            │  │
-   │   │ shell- │     │ ring   │     │  build .ko against the     │  │
-   │   │  check │     │ seqlock│     │  runner's kernel           │  │
-   │   │ cppchk │     │ race   │     │  insmod → simulation mode  │  │
-   │   │ check- │     │        │     │  read() path: 0 gaps       │  │
-   │   │  patch │     │        │     │  mmap path:   0 gaps       │  │
-   │   └───┬────┘     └───┬────┘     │  rmmod, dmesg clean        │  │
+   │   │  lint  │     │  unit  │──┬─►│  module  (x86-64)          │  │
+   │   │        │     │        │  │  │  module  (ARM64)           │  │
+   │   │ dtc    │     │ ABI    │  │  │  build .ko against the     │  │
+   │   │ shell- │     │ ring   │  │  │  runner's kernel           │  │
+   │   │  check │     │ seqlock│  │  │  insmod → simulation mode  │  │
+   │   │ cppchk │     │ race   │  │  │  read() + mmap: 0 gaps     │  │
+   │   │ check- │     │        │  │  │  rmmod, dmesg clean        │  │
+   │   │  patch │     │        │  │  └─────────────┬──────────────┘  │
+   │   └───┬────┘     └───┬────┘  │  ┌─────────────┴──────────────┐  │
+   │       │              │       └─►│  hal  (gpio-sim)           │  │
+   │       │              │          │  simulated gpiochip, module│  │
+   │       │              │          │  in HARDWARE mode, 500     │  │
+   │       │              │          │  edges → 500 IRQs, 0 gaps  │  │
    │       │              │          └─────────────┬──────────────┘  │
    │       └──────────────┴────────────────────────┘                 │
    │                              │ all green                        │
@@ -49,7 +53,7 @@ terminal, and in a PDF.
                     │ branch protection on master │
                     │ required checks: lint,      │
                     │ unit, module (x86-64),      │
-                    │ module (arm64)              │
+                    │ module (arm64), hal         │
                     └─────────────┬───────────────┘
                      red: merge   │   green: merge
                      button       │   button enabled
@@ -95,6 +99,10 @@ learn to route around.
  │          │ loads, probes (simulation), runs   │  arm64      │          │
  │          │ both data paths lose nothing       │             │          │
  │          │ unloads with a clean dmesg         │             │          │
+ │ hal      │ the HARDWARE path with no hardware:│ hal         │ yes      │
+ │          │ gpiod, request_threaded_irq, ISR,  │ (gpio-sim)  │ (skips   │
+ │          │ 500 user-space edges → 500 IRQs    │             │  if no   │
+ │          │ and 0 gaps on a simulated gpiochip │             │  gpio-sim)│
  │ image    │ the whole image reproduces from    │ image.yml   │ release  │
  │          │ one command; overlay + module in it│             │          │
  │ hil      │ hardware mode; no lost edges 1–50k │ Pi          │ manual   │
@@ -143,6 +151,122 @@ looks like in practice.
 
 ---
 
+## 4b. The testing ladder: unit, HAL, emulation, hardware
+
+"Can this be tested without the hardware?" has four different answers
+depending on what *this* is. Each rung proves something the one below
+cannot, and costs more to climb.
+
+```text
+   rung   what runs                  what it proves                    cost      here
+   ────   ─────────────────────────  ────────────────────────────────  ────────  ──────────
+    4     real board + real wire     the physics: latency, jitter,     a Pi on   hil.yml
+          (HIL)                      lost edges, thermal, the SoC's    the bench (manual)
+                                     GPIO block, the actual overlay
+    3     emulated SoC               boot chain, kernel config, DTB,   hours to  not built
+          (QEMU / Renode)            init scripts - the *image*, not   set up    (see below)
+                                     the timing
+    2     simulated peripheral       gpiod, request_threaded_irq,      minutes   ci.yml
+          (gpio-sim, "HAL" level)    the ISR, the ring - the driver's  free      `hal` job
+                                     hardware path, with fake edges
+    1     user-space unit tests      ABI layout, arithmetic, the       seconds   ci.yml
+                                     head protocol under a race        free      `unit` job
+    0     build + load, sim mode     it compiles on this kernel and    minutes   ci.yml
+                                     the data paths lose nothing       free      `module` job
+```
+
+### Rung 2 — the HAL test, and why it exists
+
+There is no formal "HAL" in a Linux driver the way there is in
+microcontroller firmware; the equivalent seam is **gpiolib and the IRQ
+core**. The driver asks for two lines by name (`trigger`, `irq`) and an
+interrupt on one of them, and does not care what is behind them.
+
+The kernel ships a simulated GPIO chip for exactly this purpose:
+`gpio-sim`, configured through configfs, whose lines can be driven from
+user space and which raises real edge interrupts through the ordinary
+IRQ machinery. So the `hal` job does this:
+
+```text
+   configfs                          kernel                        driver
+   ────────                          ──────                        ──────
+   mkdir gpio-sim/daq/bank0
+   num_lines = 2, label = daqring-sim
+   live = 1                  ──────► gpiochip "daqring-sim"
+                                     lines 0 and 1
+
+   insmod daqring.ko gpiochip=daqring-sim trigger_line=0 irq_line=1
+                                     lookup table:                 probe():
+                                       "trigger" → line 0  ──────►  gpiod_get("trigger")  ✓
+                                       "irq"     → line 1  ──────►  gpiod_get("irq")      ✓
+                                                                     gpiod_to_irq()        ✓
+                                                                     request_threaded_irq ✓
+                                                                     mode = HARDWARE
+
+   echo pull-up   > sim_gpio1/pull ─► edge ─► IRQ ─► hardirq half: timestamp, write slot
+   echo pull-down > sim_gpio1/pull                   threaded half: wake readers
+        × 500                                       user space: read() 500 samples, 0 gaps
+                                                    sysfs: irqs=500     ← the assertion
+```
+
+What it proves: the entire hardware code path — GPIO acquisition,
+interrupt registration, the hard/threaded split, the ring, the wake-up,
+the counters — on a cloud VM with no pins. What it cannot prove:
+anything about *timing*. The latency numbers it produces are
+meaningless, because the "trigger" the hrtimer pulses is not wired to
+the "irq" line; the edges come from a shell loop. Timing is rung 4's
+job and nothing lower can do it.
+
+This is also the honest answer to "how do you develop a driver before
+the card exists?": the same lookup-table mechanism that points at
+`gpio-sim` today points at a real FPGA's lines tomorrow, and nothing in
+`probe()` changes.
+
+### Rung 3 — QEMU and Renode, and why they are not here (yet)
+
+An emulator sits between the simulated peripheral and the real board.
+Two things it would add:
+
+- **A boot test of the actual image.** `qemu-system-aarch64 -M raspi3b`
+  can boot a Raspberry Pi kernel and root filesystem, which would turn
+  "the image builds" into "the image boots to a login prompt and
+  `S99daqring` loaded the module". That is a genuine gap in this
+  pipeline: `image.yml` verifies the image's *contents*, not that it
+  boots.
+- **A model of the card.** For a real FPGA card the mature practice is
+  a QEMU device model of its register map, so the driver is developed
+  and regression-tested against the model before and alongside the
+  silicon — the approach in *QEMU-based hardware/software co-development
+  for DAQ systems* (arXiv:2109.14735), cited in the README.
+
+Why it is not built here: the first needs a day of work to get a Pi 3
+image booting under QEMU reliably (the machine model, DTB and kernel
+must agree, and the 32-bit-kernel-on-raspi3b case is fiddly), and even
+then QEMU's BCM2837 GPIO model does not deliver edge interrupts the way
+the silicon does — so it would not replace rung 2, only rung 0 for the
+image. The second is a project in itself, and only worth it for a card
+that exists. **Renode** is the purpose-built alternative — designed for
+peripheral models and multi-node simulation, with a testing DSL — and
+is what I would reach for over QEMU if a card model were the goal.
+
+The pragmatic call for a project this size: rung 2 gives most of the
+value of rung 3 at a hundredth of the cost, and rung 4 is a Pi and a
+wire. QEMU earns its place the day the image boot test is worth a day.
+
+### Rung 1½ — KUnit, for the purist
+
+The kernel has its own unit-test framework, KUnit, which runs test
+cases *inside* the kernel (under UML or a VM) and can reach static
+functions directly. It is the right tool for testing kernel-side logic
+that cannot be lifted into user space. Here, the logic that matters
+*could* be lifted — the head protocol and ring arithmetic live in
+`include/daqring_ring.h`, used by the test client and the tests alike —
+so the user-space tests cover it at a fraction of the setup. If the
+driver grew logic that could not be shared that way, KUnit is where it
+would be tested.
+
+---
+
 ## 5. Gating: how a failed check becomes a rejected change
 
 CI does not merge, and CI does not reject. CI **reports**, and branch
@@ -184,7 +308,7 @@ gated. Turn "include administrators" on the day a second person joins.
 
 ## 6. The unit tests, and the bug they found
 
-`test/unit_ring.c` — 20 checks, TAP output, non-zero exit on failure:
+`test/unit_ring.c` — 25 checks, TAP output, non-zero exit on failure:
 
 ```text
    ABI layout          sample is 24 bytes; every field at its documented

@@ -83,15 +83,19 @@ footer{border-top:1px solid var(--rule);padding-top:1rem;margin-top:1.5rem;
    │  ci.yml  (every push, every pull request)          ~5 minutes   │
    │                                                                 │
    │   ┌────────┐     ┌────────┐     ┌────────────────────────────┐  │
-   │   │  lint  │     │  unit  │────►│  module  (x86-64)          │  │
-   │   │        │     │        │     │  module  (ARM64)           │  │
-   │   │ dtc    │     │ ABI    │     │                            │  │
-   │   │ shell- │     │ ring   │     │  build .ko against the     │  │
-   │   │  check │     │ seqlock│     │  runner&#x27;s kernel           │  │
-   │   │ cppchk │     │ race   │     │  insmod → simulation mode  │  │
-   │   │ check- │     │        │     │  read() path: 0 gaps       │  │
-   │   │  patch │     │        │     │  mmap path:   0 gaps       │  │
-   │   └───┬────┘     └───┬────┘     │  rmmod, dmesg clean        │  │
+   │   │  lint  │     │  unit  │──┬─►│  module  (x86-64)          │  │
+   │   │        │     │        │  │  │  module  (ARM64)           │  │
+   │   │ dtc    │     │ ABI    │  │  │  build .ko against the     │  │
+   │   │ shell- │     │ ring   │  │  │  runner&#x27;s kernel           │  │
+   │   │  check │     │ seqlock│  │  │  insmod → simulation mode  │  │
+   │   │ cppchk │     │ race   │  │  │  read() + mmap: 0 gaps     │  │
+   │   │ check- │     │        │  │  │  rmmod, dmesg clean        │  │
+   │   │  patch │     │        │  │  └─────────────┬──────────────┘  │
+   │   └───┬────┘     └───┬────┘  │  ┌─────────────┴──────────────┐  │
+   │       │              │       └─►│  hal  (gpio-sim)           │  │
+   │       │              │          │  simulated gpiochip, module│  │
+   │       │              │          │  in HARDWARE mode, 500     │  │
+   │       │              │          │  edges → 500 IRQs, 0 gaps  │  │
    │       │              │          └─────────────┬──────────────┘  │
    │       └──────────────┴────────────────────────┘                 │
    │                              │ all green                        │
@@ -101,7 +105,7 @@ footer{border-top:1px solid var(--rule);padding-top:1rem;margin-top:1.5rem;
                     │ branch protection on master │
                     │ required checks: lint,      │
                     │ unit, module (x86-64),      │
-                    │ module (arm64)              │
+                    │ module (arm64), hal         │
                     └─────────────┬───────────────┘
                      red: merge   │   green: merge
                      button       │   button enabled
@@ -138,6 +142,10 @@ footer{border-top:1px solid var(--rule);padding-top:1rem;margin-top:1.5rem;
  │          │ loads, probes (simulation), runs   │  arm64      │          │
  │          │ both data paths lose nothing       │             │          │
  │          │ unloads with a clean dmesg         │             │          │
+ │ hal      │ the HARDWARE path with no hardware:│ hal         │ yes      │
+ │          │ gpiod, request_threaded_irq, ISR,  │ (gpio-sim)  │ (skips   │
+ │          │ 500 user-space edges → 500 IRQs    │             │  if no   │
+ │          │ and 0 gaps on a simulated gpiochip │             │  gpio-sim)│
  │ image    │ the whole image reproduces from    │ image.yml   │ release  │
  │          │ one command; overlay + module in it│             │          │
  │ hil      │ hardware mode; no lost edges 1–50k │ Pi          │ manual   │
@@ -158,6 +166,55 @@ footer{border-top:1px solid var(--rule);padding-top:1rem;margin-top:1.5rem;
                                      real latency                  artefact</pre></div>
 <p>Tier 2 is a Raspberry Pi registered as a GitHub self-hosted runner — three commands from <em>Settings → Actions → Runners</em>, then a service so it survives reboots. <code>hil.yml</code> targets the label <code>pi</code> and is manual-trigger only, so a Pi that is powered off never blocks anyone.</p>
 <p>This is the shape CI takes at any company whose product is an instrument: everything that needs no hardware runs on cheap hosted machines, and one bench machine with the real card does the rest. Kontur&#x27;s advert calls it <em>&quot;automated deployment&quot;</em>; this is what that looks like in practice.</p>
+<hr>
+<h2>4b. The testing ladder: unit, HAL, emulation, hardware</h2>
+<p>&quot;Can this be tested without the hardware?&quot; has four different answers depending on what <em>this</em> is. Each rung proves something the one below cannot, and costs more to climb.</p>
+<div class="fig"><pre>   rung   what runs                  what it proves                    cost      here
+   ────   ─────────────────────────  ────────────────────────────────  ────────  ──────────
+    4     real board + real wire     the physics: latency, jitter,     a Pi on   hil.yml
+          (HIL)                      lost edges, thermal, the SoC&#x27;s    the bench (manual)
+                                     GPIO block, the actual overlay
+    3     emulated SoC               boot chain, kernel config, DTB,   hours to  not built
+          (QEMU / Renode)            init scripts - the *image*, not   set up    (see below)
+                                     the timing
+    2     simulated peripheral       gpiod, request_threaded_irq,      minutes   ci.yml
+          (gpio-sim, &quot;HAL&quot; level)    the ISR, the ring - the driver&#x27;s  free      `hal` job
+                                     hardware path, with fake edges
+    1     user-space unit tests      ABI layout, arithmetic, the       seconds   ci.yml
+                                     head protocol under a race        free      `unit` job
+    0     build + load, sim mode     it compiles on this kernel and    minutes   ci.yml
+                                     the data paths lose nothing       free      `module` job</pre></div>
+<h3>Rung 2 — the HAL test, and why it exists</h3>
+<p>There is no formal &quot;HAL&quot; in a Linux driver the way there is in microcontroller firmware; the equivalent seam is <strong>gpiolib and the IRQ core</strong>. The driver asks for two lines by name (<code>trigger</code>, <code>irq</code>) and an interrupt on one of them, and does not care what is behind them.</p>
+<p>The kernel ships a simulated GPIO chip for exactly this purpose: <code>gpio-sim</code>, configured through configfs, whose lines can be driven from user space and which raises real edge interrupts through the ordinary IRQ machinery. So the <code>hal</code> job does this:</p>
+<div class="fig"><pre>   configfs                          kernel                        driver
+   ────────                          ──────                        ──────
+   mkdir gpio-sim/daq/bank0
+   num_lines = 2, label = daqring-sim
+   live = 1                  ──────► gpiochip &quot;daqring-sim&quot;
+                                     lines 0 and 1
+
+   insmod daqring.ko gpiochip=daqring-sim trigger_line=0 irq_line=1
+                                     lookup table:                 probe():
+                                       &quot;trigger&quot; → line 0  ──────►  gpiod_get(&quot;trigger&quot;)  ✓
+                                       &quot;irq&quot;     → line 1  ──────►  gpiod_get(&quot;irq&quot;)      ✓
+                                                                     gpiod_to_irq()        ✓
+                                                                     request_threaded_irq ✓
+                                                                     mode = HARDWARE
+
+   echo pull-up   &gt; sim_gpio1/pull ─► edge ─► IRQ ─► hardirq half: timestamp, write slot
+   echo pull-down &gt; sim_gpio1/pull                   threaded half: wake readers
+        × 500                                       user space: read() 500 samples, 0 gaps
+                                                    sysfs: irqs=500     ← the assertion</pre></div>
+<p>What it proves: the entire hardware code path — GPIO acquisition, interrupt registration, the hard/threaded split, the ring, the wake-up, the counters — on a cloud VM with no pins. What it cannot prove: anything about <em>timing</em>. The latency numbers it produces are meaningless, because the &quot;trigger&quot; the hrtimer pulses is not wired to the &quot;irq&quot; line; the edges come from a shell loop. Timing is rung 4&#x27;s job and nothing lower can do it.</p>
+<p>This is also the honest answer to &quot;how do you develop a driver before the card exists?&quot;: the same lookup-table mechanism that points at <code>gpio-sim</code> today points at a real FPGA&#x27;s lines tomorrow, and nothing in <code>probe()</code> changes.</p>
+<h3>Rung 3 — QEMU and Renode, and why they are not here (yet)</h3>
+<p>An emulator sits between the simulated peripheral and the real board. Two things it would add:</p>
+<ul><li><strong>A boot test of the actual image.</strong> <code>qemu-system-aarch64 -M raspi3b</code> can boot a Raspberry Pi kernel and root filesystem, which would turn &quot;the image builds&quot; into &quot;the image boots to a login prompt and <code>S99daqring</code> loaded the module&quot;. That is a genuine gap in this pipeline: <code>image.yml</code> verifies the image&#x27;s <em>contents</em>, not that it boots.</li><li><strong>A model of the card.</strong> For a real FPGA card the mature practice is a QEMU device model of its register map, so the driver is developed and regression-tested against the model before and alongside the silicon — the approach in <em>QEMU-based hardware/software co-development for DAQ systems</em> (arXiv:2109.14735), cited in the README.</li></ul>
+<p>Why it is not built here: the first needs a day of work to get a Pi 3 image booting under QEMU reliably (the machine model, DTB and kernel must agree, and the 32-bit-kernel-on-raspi3b case is fiddly), and even then QEMU&#x27;s BCM2837 GPIO model does not deliver edge interrupts the way the silicon does — so it would not replace rung 2, only rung 0 for the image. The second is a project in itself, and only worth it for a card that exists. <strong>Renode</strong> is the purpose-built alternative — designed for peripheral models and multi-node simulation, with a testing DSL — and is what I would reach for over QEMU if a card model were the goal.</p>
+<p>The pragmatic call for a project this size: rung 2 gives most of the value of rung 3 at a hundredth of the cost, and rung 4 is a Pi and a wire. QEMU earns its place the day the image boot test is worth a day.</p>
+<h3>Rung 1½ — KUnit, for the purist</h3>
+<p>The kernel has its own unit-test framework, KUnit, which runs test cases <em>inside</em> the kernel (under UML or a VM) and can reach static functions directly. It is the right tool for testing kernel-side logic that cannot be lifted into user space. Here, the logic that matters <em>could</em> be lifted — the head protocol and ring arithmetic live in <code>include/daqring_ring.h</code>, used by the test client and the tests alike — so the user-space tests cover it at a fraction of the setup. If the driver grew logic that could not be shared that way, KUnit is where it would be tested.</p>
 <hr>
 <h2>5. Gating: how a failed check becomes a rejected change</h2>
 <p>CI does not merge, and CI does not reject. CI <strong>reports</strong>, and branch protection <strong>enforces</strong>. They are set separately.</p>
@@ -184,7 +241,7 @@ footer{border-top:1px solid var(--rule);padding-top:1rem;margin-top:1.5rem;
 <p>For a one-person repository the honest configuration is: rule on, &quot;include administrators&quot; <strong>off</strong>, so the owner can still push directly in an emergency — while every pull request, including the owner&#x27;s own, is gated. Turn &quot;include administrators&quot; on the day a second person joins.</p>
 <hr>
 <h2>6. The unit tests, and the bug they found</h2>
-<p><code>test/unit_ring.c</code> — 20 checks, TAP output, non-zero exit on failure:</p>
+<p><code>test/unit_ring.c</code> — 25 checks, TAP output, non-zero exit on failure:</p>
 <div class="fig"><pre>   ABI layout          sample is 24 bytes; every field at its documented
                        offset; hdr.head 8-byte aligned; header fits a page
    ring arithmetic     slot wraps at capacity; computed in 64 bits;
