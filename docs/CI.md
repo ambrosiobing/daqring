@@ -17,7 +17,9 @@ terminal, and in a PDF.
 | Otherwise merged into master? | **Yes** — merged by a person clicking the button, or automatically if auto-merge is enabled. CI never merges on its own initiative; it *permits* merging. |
 | Python or C/C++ for GitHub Actions? | **Neither.** Workflows are YAML; steps are shell. The code under test is C, so the tests are C. Python has no role here — see §7. |
 | Do I need a Jenkins server? | **No.** Hosted GitHub Actions is free for public repositories and needs no server. Jenkins is for when you must self-host everything — see §8. |
-| What can CI *not* test? | Hardware mode. No hosted runner has GPIO or a device tree. That runs on a self-hosted runner: the Pi on the bench (§4). |
+| What can CI *not* test? | **Timing.** The hardware *code path* — gpiod, the IRQ, the ISR — runs in CI on a simulated gpiochip (`hal` job, §4b). What no hosted runner can measure is real latency, jitter and lost edges on a real SoC; that is the self-hosted Pi (§4). |
+| HAL-level tests without hardware? | **Yes** — the kernel's `gpio-sim` provides a simulated chip whose lines raise real interrupts; the driver is pointed at it by module parameters and 500 user-space edges must become exactly 500 interrupts (§4b). |
+| QEMU or similar? | **Not yet, deliberately.** It would add an image boot test and, for a real card, a register-map model; both are explained and costed in §4b. Renode over QEMU if a card model is ever the goal. |
 
 ---
 
