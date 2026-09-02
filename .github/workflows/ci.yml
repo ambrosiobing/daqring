@@ -131,3 +131,85 @@ jobs:
           if sudo dmesg | grep -qE "BUG:|Oops|WARNING: .*daqring|general protection"; then
             echo "::error::kernel reported a problem"; sudo dmesg | tail -n 40; exit 1
           fi
+
+  # The hardware code path - gpiod, request_threaded_irq, the ISR - on a
+  # machine with no GPIOs: the kernel's gpio-sim provides a simulated
+  # gpiochip, the driver is pointed at it through module parameters, and
+  # a user-space loop drives edges on the "irq" line. Every edge must
+  # arrive as an interrupt and produce a sample. This is the HAL-level
+  # test between the unit tests and the real board.
+  hal:
+    name: hal (gpio-sim, real ISR path, no hardware)
+    needs: [unit]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: kernel headers for the runner's kernel
+        run: |
+          uname -r
+          sudo apt-get update -q
+          sudo apt-get install -y -q "linux-headers-$(uname -r)"
+
+      - name: build module and test client
+        run: make module test/daqring_test
+
+      - name: simulated gpiochip (gpio-sim, 2 lines, label daqring-sim)
+        id: sim
+        run: |
+          if ! sudo modprobe gpio-sim 2>/dev/null; then
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::gpio-sim is not available on kernel $(uname -r); HAL test skipped"
+            exit 0
+          fi
+          sudo mount -t configfs none /sys/kernel/config 2>/dev/null || true
+          d=/sys/kernel/config/gpio-sim/daq
+          sudo mkdir -p "$d/bank0"
+          echo 2 | sudo tee "$d/bank0/num_lines" >/dev/null
+          echo daqring-sim | sudo tee "$d/bank0/label" >/dev/null
+          echo 1 | sudo tee "$d/live" >/dev/null
+          line=$(ls -d /sys/devices/platform/gpio-sim.*/gpiochip*/sim_gpio1 | head -1)
+          test -n "$line"
+          echo "line=$line" >> "$GITHUB_OUTPUT"
+          echo "have=true" >> "$GITHUB_OUTPUT"
+          echo "irq line sysfs: $line"
+
+      - name: load in harness mode - must come up in HARDWARE mode
+        if: steps.sim.outputs.have == 'true'
+        run: |
+          sudo insmod daqring.ko gpiochip=daqring-sim trigger_line=0 irq_line=1
+          sudo dmesg | grep daqring | tail -n 3
+          mode=$(cat /sys/class/misc/daqring/mode)
+          echo "mode: $mode"
+          test "$mode" = hardware
+
+      - name: drive 500 edges from user space; every one must become an interrupt
+        if: steps.sim.outputs.have == 'true'
+        env:
+          LINE: ${{ steps.sim.outputs.line }}
+        run: |
+          echo pull-down | sudo tee "$LINE/pull" >/dev/null
+          sudo ./test/daqring_test read 1000 4 > read.txt 2>&1 &
+          sleep 0.5
+          # One privileged shell for the whole burst; 500 rising edges.
+          sudo sh -c 'i=0; while [ $i -lt 500 ]; do
+                        echo pull-up   > "$0/pull"
+                        echo pull-down > "$0/pull"
+                        i=$((i+1)); done' "$LINE"
+          wait
+          cat read.txt
+          stats=$(cat /sys/class/misc/daqring/irq_latency)
+          irqs=$(printf '%s' "$stats" | sed -n 's/.*irqs=\([0-9]*\).*/\1/p')
+          echo "edges driven: 500   interrupts taken: $irqs"
+          test "$irqs" -eq 500
+          grep -q ", 0 sequence gaps" read.txt
+
+      - name: unload, tear down the simulated chip
+        if: steps.sim.outputs.have == 'true'
+        run: |
+          sudo rmmod daqring
+          echo 0 | sudo tee /sys/kernel/config/gpio-sim/daq/live >/dev/null
+          sudo rmdir /sys/kernel/config/gpio-sim/daq/bank0 /sys/kernel/config/gpio-sim/daq
+          if sudo dmesg | grep -qE "BUG:|Oops|WARNING: .*daqring"; then
+            echo "::error::kernel reported a problem"; sudo dmesg | tail -n 40; exit 1
+          fi

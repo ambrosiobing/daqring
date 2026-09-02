@@ -38,6 +38,7 @@
 #include <linux/of.h>
 #include <linux/property.h>
 #include <linux/gpio/consumer.h>
+#include <linux/gpio/machine.h>
 #include <linux/interrupt.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
@@ -75,6 +76,24 @@ typedef unsigned int __poll_t;
 static unsigned int ring_pages = 16;
 module_param(ring_pages, uint, 0444);
 MODULE_PARM_DESC(ring_pages, "Pages of sample storage in the ring (default 16, DT ring-pages wins)");
+
+/*
+ * Test-harness wiring. Without a device-tree node the driver normally
+ * falls back to simulation mode. These parameters instead point it at
+ * two lines on a named gpiochip - typically one created by the kernel's
+ * gpio-sim - so the *hardware* code path (gpiod, request_threaded_irq,
+ * the ISR) runs on a machine with no GPIOs at all. CI uses this to
+ * exercise the interrupt path on every push; see docs/CI.md.
+ */
+static char *gpiochip;
+module_param(gpiochip, charp, 0444);
+MODULE_PARM_DESC(gpiochip, "Harness: label of the gpiochip supplying trigger/irq lines (no DT)");
+static int trigger_line = -1;
+module_param(trigger_line, int, 0444);
+MODULE_PARM_DESC(trigger_line, "Harness: line offset on `gpiochip` used as trigger output");
+static int irq_line = -1;
+module_param(irq_line, int, 0444);
+MODULE_PARM_DESC(irq_line, "Harness: line offset on `gpiochip` used as interrupt input");
 
 /* Latency histogram bucket upper bounds, in ns. */
 static const u64 daqring_lat_edge[DAQRING_LAT_BUCKETS] = {
@@ -752,10 +771,47 @@ static struct platform_driver daqring_driver = {
 
 /*
  * If no device-tree node describes the card, register a bare platform
- * device so the driver still binds (by name) and runs in simulation
- * mode - keeps the module usable on any machine, DT or not.
+ * device so the driver still binds (by name). It then runs in
+ * simulation mode - unless the harness parameters name a gpiochip, in
+ * which case a GPIO lookup table hands the same two lines to probe()
+ * that a device tree would, and the hardware path runs instead.
  */
 static struct platform_device *daqring_sim_pdev;
+static struct gpiod_lookup_table *daqring_lookup;
+
+static int daqring_add_harness_lookup(void)
+{
+	struct gpiod_lookup_table *lt;
+
+	if (!gpiochip || trigger_line < 0 || irq_line < 0)
+		return 0;
+
+	/* Two entries plus the zeroed sentinel gpiolib stops on. */
+	lt = kzalloc(sizeof(*lt) + 3 * sizeof(lt->table[0]), GFP_KERNEL);
+	if (!lt)
+		return -ENOMEM;
+
+	lt->dev_id = DAQRING_NAME;	/* matches dev_name() of the pdev */
+	lt->table[0] = GPIO_LOOKUP(gpiochip, trigger_line, "trigger",
+				   GPIO_ACTIVE_HIGH);
+	lt->table[1] = GPIO_LOOKUP(gpiochip, irq_line, "irq",
+				   GPIO_ACTIVE_HIGH);
+	gpiod_add_lookup_table(lt);
+	daqring_lookup = lt;
+
+	pr_info("daqring: harness wiring on gpiochip '%s': trigger=%d irq=%d\n",
+		gpiochip, trigger_line, irq_line);
+	return 0;
+}
+
+static void daqring_remove_harness_lookup(void)
+{
+	if (!daqring_lookup)
+		return;
+	gpiod_remove_lookup_table(daqring_lookup);
+	kfree(daqring_lookup);
+	daqring_lookup = NULL;
+}
 
 static int __init daqring_init(void)
 {
@@ -769,22 +825,34 @@ static int __init daqring_init(void)
 	np = of_find_compatible_node(NULL, NULL, "jap,daqring");
 	if (np) {
 		of_node_put(np);
-	} else {
-		daqring_sim_pdev = platform_device_register_simple(
-					DAQRING_NAME, -1, NULL, 0);
-		if (IS_ERR(daqring_sim_pdev)) {
-			ret = PTR_ERR(daqring_sim_pdev);
-			platform_driver_unregister(&daqring_driver);
-			return ret;
-		}
+		return 0;
+	}
+
+	/* The lookup must exist before the device does, or probe() misses it. */
+	ret = daqring_add_harness_lookup();
+	if (ret)
+		goto err_driver;
+
+	daqring_sim_pdev = platform_device_register_simple(DAQRING_NAME, -1,
+							   NULL, 0);
+	if (IS_ERR(daqring_sim_pdev)) {
+		ret = PTR_ERR(daqring_sim_pdev);
+		goto err_lookup;
 	}
 	return 0;
+
+err_lookup:
+	daqring_remove_harness_lookup();
+err_driver:
+	platform_driver_unregister(&daqring_driver);
+	return ret;
 }
 
 static void __exit daqring_exit(void)
 {
 	if (daqring_sim_pdev)
 		platform_device_unregister(daqring_sim_pdev);
+	daqring_remove_harness_lookup();
 	platform_driver_unregister(&daqring_driver);
 }
 
