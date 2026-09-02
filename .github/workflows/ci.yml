@@ -7,11 +7,14 @@
 #   module   - build the kernel module against the runner's kernel, load
 #              it, run both data paths in simulation mode, unload cleanly;
 #              on x86-64 and on ARM64
+#   hal      - the hardware code path with no hardware: a gpio-sim chip
+#              stands in for the card, 500 user-space edges must become
+#              exactly 500 interrupts
 #
-# Gates: lint (blocking parts), unit and module must all pass before a
-# pull request can be merged (branch protection, see docs/CI.md).
-# Hardware mode cannot run here - no GPIO, no device tree on a hosted
-# runner - it runs on the self-hosted Pi via hil.yml.
+# Gates: lint (blocking parts), unit, module and hal must all pass
+# before a pull request can be merged (branch protection, docs/CI.md).
+# What no hosted runner can do is *timing* - real latency, jitter, lost
+# edges on a real SoC. That runs on the self-hosted Pi via hil.yml.
 
 name: ci
 
