@@ -145,11 +145,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: kernel headers for the runner's kernel
+      - name: kernel headers and extra modules (gpio-sim lives in modules-extra)
         run: |
           uname -r
           sudo apt-get update -q
-          sudo apt-get install -y -q "linux-headers-$(uname -r)"
+          sudo apt-get install -y -q "linux-headers-$(uname -r)" "linux-modules-extra-$(uname -r)"
+          modinfo gpio-sim | head -n 3 || echo "::warning::gpio-sim.ko not found after installing modules-extra"
 
       - name: build module and test client
         run: make module test/daqring_test
