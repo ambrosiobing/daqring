@@ -1,5 +1,13 @@
 # daqring — a simulated data-acquisition card driver
 
+[![ci](https://github.com/ambrosiobing/daqring/actions/workflows/ci.yml/badge.svg)](https://github.com/ambrosiobing/daqring/actions/workflows/ci.yml)
+[![image](https://github.com/ambrosiobing/daqring/actions/workflows/image.yml/badge.svg)](https://github.com/ambrosiobing/daqring/actions/workflows/image.yml)
+
+Every push runs lint, unit tests, and a build-load-run of the module on
+x86-64 and ARM64; tags build the bootable image and attach it to a
+release; a self-hosted Pi runs hardware mode on demand. How and why:
+[docs/CI.md](docs/CI.md).
+
 A small Linux kernel module that models the software side of an FPGA-based
 data-acquisition add-on card, without needing the hardware. It exists to
 demonstrate the pieces a real DAQ driver is made of:

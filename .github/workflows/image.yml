@@ -1,0 +1,96 @@
+# Continuous delivery: the bootable Buildroot image.
+#
+# Heavy (about two hours on a 4-core hosted runner, ~12 GB of disk), so
+# it does not run on every push. It runs:
+#   - on demand, from the Actions tab
+#   - weekly, to catch upstream drift before a release does
+#   - on every version tag, where it also publishes a GitHub Release
+#     with sdcard.img attached
+#
+# The build itself is scripts/buildroot-overnight.sh - the same script
+# a person runs - so CI and a laptop produce the image the same way.
+
+name: image
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"      # Mondays, 03:17 UTC
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write            # to attach the image to a Release
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false  # never cancel a two-hour build midway
+
+jobs:
+  buildroot:
+    name: Buildroot image (raspberrypi3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 340     # inside the 6-hour hosted limit, with margin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: free disk space (Buildroot needs ~12 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo apt-get clean
+          df -h / | tail -1
+
+      - name: build prerequisites
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q build-essential bison flex bc cpio unzip rsync \
+            file wget python3 libncurses-dev git device-tree-compiler
+
+      - name: restore Buildroot download cache
+        uses: actions/cache@v4
+        with:
+          path: ~/br/dl
+          key: buildroot-dl-2024.02.9-${{ hashFiles('br2-external/configs/daqring.fragment') }}
+          restore-keys: buildroot-dl-2024.02.9-
+
+      - name: build
+        env:
+          # Buildroot honours this: downloads land outside the tree, so
+          # the cache step above survives between runs.
+          BR2_DL_DIR: /home/runner/br/dl
+        run: |
+          mkdir -p ~/br/dl
+          # The script logs to ~/br/build.log; surface progress here too.
+          ./scripts/buildroot-overnight.sh &
+          pid=$!
+          while kill -0 $pid 2>/dev/null; do
+            sleep 300
+            printf '%s  %s\n' "$(date -u +%H:%M)" "$(tail -n 1 ~/br/build.log | cut -c1-100)"
+          done
+          wait $pid
+
+      - name: verify image contents
+        run: ./scripts/verify-image.sh
+
+      - name: show result
+        run: ls -la ~/br/buildroot-*/output/images/
+
+      - name: upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: daqring-sdcard-${{ github.sha }}
+          path: ~/br/buildroot-*/output/images/sdcard.img
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ~/br/buildroot-*/output/images/sdcard.img
+          generate_release_notes: true
+
+      - name: build log on failure
+        if: failure()
+        run: tail -n 120 ~/br/build.log || true

@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include "daqring.h"
+#include "daqring_ring.h"	/* daqring_load_head, daqring_ring_* */
 
 #define DEVICE "/dev/daqring"
 #define BATCH 256
@@ -31,36 +32,6 @@ static uint64_t now_ns(void)
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-}
-
-/*
- * Acquire-load the producer's 64-bit head from a read-only mapping.
- *
- * A plain __atomic_load_n() on 8 bytes has no native instruction on
- * 32-bit ARM, so it becomes a libatomic call that may be implemented
- * with an exclusive load/store pair - a *write* - which faults on a
- * PROT_READ mapping. Mirror the kernel's 32-bit publish instead: it
- * stores the high word before the low word, so read high, low, then
- * high again and retry if it moved. Values only ever move forward, so
- * a retry is enough.
- */
-static uint64_t load_head(const volatile struct daqring_shm_hdr *h)
-{
-#if defined(__LP64__) || defined(_LP64)
-	return __atomic_load_n(&h->head, __ATOMIC_ACQUIRE);
-#else
-	const volatile uint32_t *w = (const volatile uint32_t *)&h->head;
-	uint32_t hi, lo, hi2;
-
-	do {
-		hi = w[1];
-		lo = w[0];
-		__atomic_thread_fence(__ATOMIC_ACQUIRE);
-		hi2 = w[1];
-	} while (hi != hi2);
-
-	return ((uint64_t)hi << 32) | lo;
-#endif
 }
 
 static void print_stats(int fd, uint64_t got, uint64_t gaps, double secs)
@@ -147,28 +118,25 @@ static int run_mmap(int fd, int seconds)
 		fprintf(stderr, "[dbg] mapped, entering consume loop\n");
 
 	/* Start consuming from wherever the producer is right now. */
-	tail = load_head(hdr);
+	tail = daqring_load_head(hdr);
 	t0 = now_ns();
 	deadline = t0 + (uint64_t)seconds * 1000000000ull;
 
 	while (now_ns() < deadline) {
-		/* Acquire pairs with the kernel's smp_store_release(). */
-		uint64_t head = load_head(hdr);
+		/* Acquire pairs with the kernel's publish; see daqring_ring.h. */
+		uint64_t head = daqring_load_head(hdr);
 
-		if (head == tail) {
+		if (head <= tail) {
 			struct timespec ts = { 0, 200000 }; /* 200 us */
 
 			nanosleep(&ts, NULL);
 			continue;
 		}
-		if (head - tail > capacity) {
-			/* Producer lapped us; resync and count the loss. */
-			gaps += head - tail - capacity;
-			tail = head - capacity;
-		}
+		/* Producer lapped us: resync and count the loss. */
+		gaps += daqring_ring_resync(head, &tail, capacity);
 		for (; tail != head; tail++) {
 			const struct daqring_sample *s =
-				&slots[tail % capacity];
+				&slots[daqring_ring_slot(tail, capacity)];
 
 			if (s->seq != tail)
 				gaps++;

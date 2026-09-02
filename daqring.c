@@ -138,22 +138,35 @@ static u32 daqring_slot(const struct daqring_dev *dev, u64 seq)
 
 /*
  * Publish the new head to the mmap header; the sample slot must be
- * visible first. On 64-bit this is one release store. A 32-bit CPU
- * cannot store 8 bytes atomically (smp_store_release rejects it at
- * compile time), so publish high word before low: a torn read is then
- * only possible at the 2^32 wrap and only ever jumps forward, which
- * consumers already handle as an overrun resync. Little-endian layout
- * assumed (true of ARM and x86).
+ * visible first.
+ *
+ * The store itself is one release store on 64-bit. A 32-bit CPU cannot
+ * store 8 bytes atomically (smp_store_release rejects it at compile
+ * time), so there the two halves go out separately, high word first.
+ *
+ * Either way the update is bracketed by a seqlock counter: odd while
+ * in progress, even when stable. That exists for *readers* that cannot
+ * load 8 bytes atomically - 32-bit user space on any kernel, including
+ * a 64-bit one - which would otherwise observe a torn value around the
+ * 2^32 wrap. A unit test (test/unit_ring.c) provokes exactly that wrap
+ * and checks the protocol under real concurrency. 64-bit readers may
+ * still acquire-load `head` directly and ignore the sequence.
  */
 static void daqring_publish_head(struct daqring_dev *dev)
 {
-#ifdef CONFIG_64BIT
-	smp_store_release(&dev->hdr->head, dev->head);
-#else
+	struct daqring_shm_hdr *hdr = dev->hdr;
+	u32 seq = READ_ONCE(hdr->head_seq) + 1;
+
+	WRITE_ONCE(hdr->head_seq, seq);		/* odd: update in progress */
 	smp_wmb();
-	WRITE_ONCE(((u32 *)&dev->hdr->head)[1], upper_32_bits(dev->head));
-	WRITE_ONCE(((u32 *)&dev->hdr->head)[0], lower_32_bits(dev->head));
+#ifdef CONFIG_64BIT
+	WRITE_ONCE(hdr->head, dev->head);
+#else
+	WRITE_ONCE(((u32 *)&hdr->head)[1], upper_32_bits(dev->head));
+	WRITE_ONCE(((u32 *)&hdr->head)[0], lower_32_bits(dev->head));
 #endif
+	smp_wmb();
+	WRITE_ONCE(hdr->head_seq, seq + 1);	/* even: stable */
 }
 
 /* Write one sample into the ring. Caller holds `lock`. */
@@ -425,6 +438,7 @@ static long daqring_ioctl(struct file *file, unsigned int cmd,
 			memset(dev->lat_hist, 0, sizeof(dev->lat_hist));
 			dev->hdr->head = 0;
 			dev->hdr->overruns = 0;
+			dev->hdr->head_seq = 0;
 			spin_unlock_irqrestore(&dev->lock, flags);
 			atomic64_set(&dev->toggle_ns, 0);
 		}

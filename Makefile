@@ -17,8 +17,18 @@ all: module test/daqring_test
 module:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
 
-test/daqring_test: test/daqring_test.c include/daqring.h
+test/daqring_test: test/daqring_test.c include/daqring.h include/daqring_ring.h
 	$(CC) -O2 -Wall -Wextra -Iinclude -o $@ test/daqring_test.c
+
+# Unit tests: pure logic, ABI layout, and the head protocol under real
+# concurrency. No hardware, no module, no root - runs anywhere.
+test/unit_ring: test/unit_ring.c include/daqring.h include/daqring_ring.h
+	$(CC) -O2 -Wall -Wextra -std=gnu11 -pthread -Iinclude -o $@ test/unit_ring.c
+
+unit: test/unit_ring
+	./test/unit_ring
+
+check: unit
 
 dtbo: daqring.dtbo
 
@@ -47,8 +57,8 @@ demo: all
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
-	rm -f test/daqring_test daqring.dtbo
+	rm -f test/daqring_test test/unit_ring daqring.dtbo
 
-.PHONY: all module dtbo install-overlay load unload demo clean
+.PHONY: all module dtbo install-overlay load unload demo unit check clean
 
 endif

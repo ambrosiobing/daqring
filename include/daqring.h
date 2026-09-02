@@ -33,6 +33,14 @@ struct daqring_shm_hdr {
 	__u32 sample_size; /* sizeof(struct daqring_sample) */
 	__u32 shm_bytes;   /* total mmap window size (this page + slots) */
 	__u32 running;     /* 1 while acquisition is running */
+	/*
+	 * Seqlock around `head` for readers that cannot load 8 bytes
+	 * atomically (32-bit user space, on any kernel). Odd while the
+	 * producer is mid-update, even when `head` is stable. 64-bit readers
+	 * may ignore it and acquire-load `head` directly.
+	 */
+	__u32 head_seq;
+	__u32 reserved;
 };
 
 struct daqring_stats {

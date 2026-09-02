@@ -1,0 +1,133 @@
+# Continuous integration: every push and pull request.
+#
+#   lint     - overlay compiles, scripts pass shellcheck, static analysis,
+#              kernel coding style (advisory)
+#   unit     - user-space unit tests: ABI layout, ring arithmetic, head
+#              protocol under concurrency across the 2^32 wrap
+#   module   - build the kernel module against the runner's kernel, load
+#              it, run both data paths in simulation mode, unload cleanly;
+#              on x86-64 and on ARM64
+#
+# Gates: lint (blocking parts), unit and module must all pass before a
+# pull request can be merged (branch protection, see docs/CI.md).
+# Hardware mode cannot run here - no GPIO, no device tree on a hosted
+# runner - it runs on the self-hosted Pi via hil.yml.
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q device-tree-compiler shellcheck cppcheck
+
+      - name: device-tree overlay compiles
+        run: dtc -@ -I dts -O dtb -o /tmp/daqring.dtbo overlays/daqring-overlay.dts
+
+      - name: shell scripts (errors block, warnings are reported)
+        run: |
+          shellcheck -S error go scripts/*.sh br2-external/board/*.sh \
+            br2-external/rootfs-overlay/etc/init.d/S99daqring
+          shellcheck -S warning go scripts/*.sh br2-external/board/*.sh \
+            br2-external/rootfs-overlay/etc/init.d/S99daqring || \
+            echo "::warning::shellcheck reported style warnings (non-blocking)"
+
+      - name: user-space static analysis
+        run: cppcheck --error-exitcode=1 --std=c11 -Iinclude --suppress=missingIncludeSystem test/
+
+      - name: kernel coding style (checkpatch, advisory)
+        continue-on-error: true
+        run: |
+          base=https://raw.githubusercontent.com/torvalds/linux/master/scripts
+          curl -sSfL -o checkpatch.pl "$base/checkpatch.pl"
+          curl -sSfL -o spelling.txt "$base/spelling.txt"
+          curl -sSfL -o const_structs.checkpatch "$base/const_structs.checkpatch"
+          perl checkpatch.pl --no-tree --file --terse --show-types \
+            daqring.c include/daqring.h include/daqring_ring.h | tee checkpatch.txt || true
+          if grep -q "ERROR:" checkpatch.txt; then
+            echo "::warning::checkpatch reported ERRORs (advisory in this project)"
+          fi
+
+  unit:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build and run
+        run: make unit
+
+  module:
+    name: module (${{ matrix.arch }})
+    needs: [unit]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86-64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: kernel headers for the runner's kernel
+        run: |
+          uname -r
+          sudo apt-get update -q
+          sudo apt-get install -y -q "linux-headers-$(uname -r)"
+
+      - name: build module and test client
+        run: make module test/daqring_test
+
+      - name: load the module (simulation mode - no GPIOs on a VM)
+        run: |
+          sudo insmod daqring.ko
+          sudo dmesg | grep daqring | tail -n 3
+          test -c /dev/daqring
+          mode=$(cat /sys/class/misc/daqring/mode)
+          echo "mode: $mode"
+          test "$mode" = simulation
+
+      - name: read()/poll() path - 5 kHz, must lose nothing
+        run: |
+          sudo ./test/daqring_test read 5000 2 | tee read.txt
+          grep -q ", 0 sequence gaps" read.txt
+
+      - name: mmap zero-copy path - 20 kHz, must lose nothing
+        run: |
+          sudo ./test/daqring_test mmap 20000 2 | tee mmap.txt
+          grep -q ", 0 sequence gaps" mmap.txt
+
+      - name: sysfs is coherent
+        run: |
+          for f in mode sample_rate_hz produced overruns running irq_latency; do
+            printf '%-16s %s\n' "$f" "$(cat /sys/class/misc/daqring/$f)"
+          done
+
+      - name: unload cleanly, no kernel warnings
+        run: |
+          sudo rmmod daqring
+          sudo dmesg | grep daqring | tail -n 2
+          if sudo dmesg | grep -qE "BUG:|Oops|WARNING: .*daqring|general protection"; then
+            echo "::error::kernel reported a problem"; sudo dmesg | tail -n 40; exit 1
+          fi

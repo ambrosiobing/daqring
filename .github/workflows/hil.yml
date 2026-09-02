@@ -1,0 +1,68 @@
+# Hardware-in-the-loop: the one thing a hosted runner cannot do.
+#
+# Runs on a self-hosted runner - a Raspberry Pi on the bench with the
+# jumper wire fitted and the overlay installed - and exercises the
+# driver in *hardware* mode: real GPIO interrupts, real latency numbers.
+#
+# Manual trigger only, so a missing or powered-off Pi never blocks
+# ordinary CI. To register the Pi as a runner:
+#   GitHub -> repo Settings -> Actions -> Runners -> New self-hosted
+#   runner -> Linux / ARM64, follow the three commands, add the label
+#   "pi" when asked. Then `sudo ./svc.sh install && sudo ./svc.sh start`
+#   so it survives reboots.
+#
+# This is the shape an instrument company's CI takes: hosted runners
+# for everything that needs no hardware, a bench machine for the rest.
+
+name: hardware-in-the-loop
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "seconds per operating point"
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  characterise:
+    name: rate sweep + latency on real hardware
+    runs-on: [self-hosted, linux, ARM64, pi]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: board and kernel
+        run: |
+          sed -n 's/^Model\s*:\s*//p' /proc/cpuinfo | head -1
+          uname -r
+
+      - name: build against the running kernel
+        run: make module test/daqring_test
+
+      - name: hardware mode is available
+        run: |
+          sudo insmod daqring.ko
+          mode=$(cat /sys/class/misc/daqring/mode)
+          sudo rmmod daqring
+          echo "mode: $mode"
+          test "$mode" = hardware
+
+      - name: characterise
+        env:
+          SECS: ${{ github.event.inputs.seconds }}
+        run: ./scripts/characterise.sh | tee characterisation.txt
+
+      - name: no lost edges at any rate
+        run: |
+          # Every idle line must have pulses == irqs.
+          awk '/idle/ { split($0,a,"pulses="); split(a[2],p," "); split($0,b,"irqs="); split(b[2],q," ");
+                        if (p[1] != q[1]) { print "lost edges: " $0; bad=1 } }
+               END { exit bad }' characterisation.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: characterisation-${{ github.run_number }}
+          path: characterisation.txt
